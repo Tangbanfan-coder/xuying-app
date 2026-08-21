@@ -88,6 +88,7 @@ describe('SettingsDrawer', () => {
     renderDrawer({ onOpenSummaryHistory })
 
     await user.click(screen.getByRole('button', { name: /记忆与上下文/ }))
+    // 页面切换带 160ms 退出动画，需等页面重挂载完成
     await waitForPageSettled('记忆与上下文')
     expect(screen.getByRole('heading', { name: '记忆与上下文' })).toBeDefined()
     expect(screen.getByText('上下文与记忆')).toBeDefined()
@@ -109,11 +110,11 @@ describe('SettingsDrawer', () => {
     await user.click(screen.getByRole('button', { name: /写作/ }))
     await waitForPageSettled('写作')
 
-    const globalHeading = screen.getByRole('heading', { name: '全局创作设定' })
+    const globalHeading = await screen.findByRole('heading', { name: '全局创作设定' })
     const globalSection = globalHeading.closest('section')
-    const toolsHeading = screen.getByRole('heading', { name: '创作辅助' })
+    const toolsHeading = await screen.findByRole('heading', { name: '创作辅助' })
     const toolsSection = toolsHeading.closest('section')
-    const localButton = screen.getByRole('button', { name: /局部创作设定/ })
+    const localButton = await screen.findByRole('button', { name: /局部创作设定/ })
     expect(globalSection?.querySelector('button')?.textContent).toContain('全局创作设定')
     expect(globalSection?.textContent).not.toContain('风格语料库')
     expect(globalSection?.textContent).not.toContain('文风优化数据')
@@ -141,6 +142,7 @@ describe('SettingsDrawer', () => {
     })
 
     await user.click(screen.getByRole('button', { name: /写作/ }))
+    // 先等页面切换完成（home 入口卸载），避免 /风格语料库/ 匹配到 home 页"写作"入口
     await waitForPageSettled('写作')
     const button = screen.getByRole('button', { name: /风格语料库/ })
     expect(button.textContent).toContain('2 个来源 · 8 个片段')
@@ -189,8 +191,8 @@ describe('SettingsDrawer', () => {
     expect(screen.getByRole('dialog', { hidden: true }).getAttribute('data-suspended')).toBe('true')
     rerender(<SettingsDrawer {...props} suspended={false} />)
 
-    expect(screen.getByRole('heading', { name: '写作' })).toBeDefined()
-    expect(screen.getByRole('button', { name: /局部创作设定/ })).toBeDefined()
+    expect(await screen.findByRole('heading', { name: '写作' })).toBeDefined()
+    expect(await screen.findByRole('button', { name: /局部创作设定/ })).toBeDefined()
   })
 
   it('opens provider settings from the model service page', async () => {

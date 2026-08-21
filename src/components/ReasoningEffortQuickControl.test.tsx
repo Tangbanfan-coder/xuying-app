@@ -15,8 +15,10 @@ describe('ReasoningEffortQuickControl', () => {
 
     const trigger = screen.getByRole('button', { name: '文本模型思考等级：自动' })
     await user.click(trigger)
-    await user.click(screen.getByRole('menuitemradio', { name: '高' }))
+    // 菜单由 usePresence 管理：打开后下一帧才挂载
+    await user.click(await screen.findByRole('menuitemradio', { name: '高' }))
     expect(onChange).toHaveBeenCalledWith('high')
+    // 选中后菜单带退出动画，需等待卸载
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
 
     await user.click(trigger)

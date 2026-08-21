@@ -114,12 +114,13 @@ describe('ProviderSettingsDialog layering', () => {
     const { container } = render(<SettingsProviderHandoff />)
 
     fireEvent.click(screen.getByRole('button', { name: /模型服务/ }))
+    // SettingsDrawer 页面切换带 160ms 退出动画，等页面重挂载完成后再进入
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '返回设置' })))
     fireEvent.click(screen.getByRole('button', { name: /文本模型/ }))
     await screen.findByRole('dialog', { name: '模型接口' })
 
     const settingsDrawer = container.querySelector('.settings-drawer')
-    const providerDialog = screen.getByRole('dialog', { name: '模型接口' })
+    const providerDialog = await screen.findByRole('dialog', { name: '模型接口' })
     expect(settingsDrawer?.getAttribute('data-suspended')).toBe('true')
     expect(container.querySelector('.settings-backdrop')).not.toBeNull()
     expect(providerDialog.classList.contains('nested-provider-dialog')).toBe(true)

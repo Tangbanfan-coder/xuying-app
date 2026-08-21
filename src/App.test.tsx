@@ -1422,6 +1422,9 @@ describe('流式滚动行为', () => {
     stickyFrame()
     render(<App />)
     const timeline = await screen.findByLabelText('创作对话')
+    // 让出事件循环，确保 booting 结束后的初始自动滚动 effect 已执行完毕；
+    // 否则它可能稍后把 scrollTop 覆盖回底部并隐藏"回到最新"按钮（时序竞态导致 flaky）
+    await new Promise((resolve) => setTimeout(resolve, 0))
     const tracked = trackScroll(timeline, 1000, 100)
     fireEvent.scroll(timeline)
     expect(await screen.findByRole('button', { name: '回到最新内容' })).toBeDefined()
@@ -1433,6 +1436,8 @@ describe('流式滚动行为', () => {
     stickyFrame()
     render(<App />)
     const timeline = await screen.findByLabelText('创作对话')
+    // 同"用户上滑"用例：先让初始自动滚动 effect 完成，避免覆盖模拟的滚动位置
+    await new Promise((resolve) => setTimeout(resolve, 0))
     const scrollTo = vi.fn()
     timeline.scrollTo = scrollTo
     trackScroll(timeline, 1000, 100)
