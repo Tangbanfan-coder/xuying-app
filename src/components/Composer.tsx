@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Check, ImagePlus, Save, Send, Square } from 'lucide-react'
 import ContextUsage, { contextUsageToolbarSummary } from './ContextUsage'
 import ComposerAssetsMenu from './ComposerAssetsMenu'
@@ -9,6 +9,7 @@ import { resolveReasoningEffortOptions } from '../providers/endpointReasoningAda
 import type { ProviderConfig, ReasoningEffort } from '../providers/types'
 import type { ContextBudgetPlan } from '../providers/writing'
 import type { GenerationPhase } from '../hooks/useWritingTurnController'
+import { focusTriggerUnlessTyping } from '../utils/menuFocus'
 
 interface ComposerProps {
   generationPhase: GenerationPhase
@@ -45,8 +46,10 @@ export default function Composer({
   const [submitting, setSubmitting] = useState(false)
   const [illustrationModeOpen, setIllustrationModeOpen] = useState(false)
   const [menuFlipped, setMenuFlipped] = useState(false)
+  const [menuShiftX, setMenuShiftX] = useState(0)
   const illustrationModeControlRef = useRef<HTMLDivElement>(null)
   const illustrationModeTriggerRef = useRef<HTMLButtonElement>(null)
+  const draftRef = useRef<HTMLTextAreaElement>(null)
   const generating = generationPhase === 'starting' || generationPhase === 'running'
   const saving = generationPhase === 'saving'
   const cancelling = generationPhase === 'cancelling'
@@ -61,7 +64,7 @@ export default function Composer({
       if (event.key !== 'Escape') return
       event.preventDefault()
       setIllustrationModeOpen(false)
-      illustrationModeTriggerRef.current?.focus()
+      focusTriggerUnlessTyping(illustrationModeTriggerRef.current)
     }
     document.addEventListener('pointerdown', closeOnOutsidePointer)
     window.addEventListener('keydown', closeOnEscape)
@@ -71,17 +74,32 @@ export default function Composer({
     }
   }, [illustrationModeOpen])
 
-  // 智能方向检测：当上方空间不足时自动向下展开
-  useEffect(() => {
-    if (!illustrationModeOpen || !illustrationModeTriggerRef.current) return
+  // 菜单定位：垂直方向空间不足时向下展开，水平方向 clamp 在视口内。
+  // 工具栏在打开后仍会重排（如上下文用量从"待计算"变为百分比、字体加载），
+  // 因此打开期间持续重测，避免锚点移动后菜单溢出屏幕。
+  useLayoutEffect(() => {
+    if (!illustrationModeOpen) return
     const trigger = illustrationModeTriggerRef.current
-    const rect = trigger.getBoundingClientRect()
-    // 菜单预估高度：3 项 × (min-height 48px + gap 2px) + padding 5px × 2 ≈ 162px + 间距 8px
-    const menuHeight = 170
-    const spaceAbove = rect.top - 8 // 上方可用空间（留 8px 边距）
-    const spaceBelow = window.innerHeight - rect.bottom - 8 // 下方可用空间
-    setMenuFlipped(spaceAbove < menuHeight && spaceBelow >= menuHeight)
-  }, [illustrationModeOpen])
+    if (!trigger) return
+    const measure = () => {
+      const currentTrigger = illustrationModeTriggerRef.current
+      if (!currentTrigger) return
+      const rect = currentTrigger.getBoundingClientRect()
+      if (!rect.width && !rect.height) return // 布局尚未就绪（如测试环境），保持默认位置
+      // 菜单预估高度：3 项 × (min-height 48px + gap 2px) + padding 5px × 2 ≈ 162px + 间距 8px
+      const menuHeight = 170
+      const margin = 12
+      const spaceAbove = rect.top - margin
+      const spaceBelow = window.innerHeight - rect.bottom - margin
+      setMenuFlipped(spaceAbove < menuHeight && spaceBelow >= menuHeight)
+      // 菜单宽度为 min(252px, 100vw - 24px)，理想右缘对齐按钮右缘；左缘不足 margin 时向右平移
+      const menuWidth = Math.min(252, window.innerWidth - margin * 2)
+      setMenuShiftX(Math.max(0, Math.round(menuWidth - rect.right + margin)))
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [illustrationModeOpen, contextUsageState])
 
   const submit = async () => {
     const text = draft.trim()
@@ -107,19 +125,19 @@ export default function Composer({
   return (
     <footer className="composer-wrap">
       <div className="composer">
-        <textarea rows={1} value={draft} placeholder="继续写下去，或告诉 AI 你想看到的画面…" aria-label="创作要求" onChange={(event) => setDraft(event.target.value)} onKeyDown={handleKeyDown} />
+        <textarea ref={draftRef} rows={1} value={draft} placeholder="继续写下去，或告诉 AI 你想看到的画面…" aria-label="创作要求" onChange={(event) => setDraft(event.target.value)} onKeyDown={handleKeyDown} />
         <div className="composer-toolbar">
           <div className="composer-tools">
             <ComposerAssetsMenu onOpenCharacterAssets={onOpenCharacterAssets} onOpenReferenceImage={onOpenReferenceImage} />
             <ReasoningEffortQuickControl value={reasoningEffort} options={reasoningOptions} onChange={onReasoningEffortChange} />
             <ContextUsage plan={contextUsagePlan} state={contextUsageState} compactLabel={contextUsageToolbarSummary(contextUsagePlan, contextUsageState)} detailsOpen={false} showDetails={false} onDetailsOpenChange={(open) => { if (open) onOpenContextUsage() }} />
             <div ref={illustrationModeControlRef} className="illustration-mode-control">
-              <button ref={illustrationModeTriggerRef} className="composer-tool-button auto-illustrate-button" type="button" aria-expanded={illustrationModeOpen} aria-haspopup="menu" aria-label={`配图模式：${illustrationMode === 'none' ? '无图' : illustrationMode === 'manual' ? '按需' : '自动'}`} onClick={() => setIllustrationModeOpen((open) => !open)}>
+              <button ref={illustrationModeTriggerRef} className="composer-tool-button auto-illustrate-button" type="button" aria-expanded={illustrationModeOpen} aria-haspopup="menu" aria-label={`配图模式：${illustrationMode === 'none' ? '无图' : illustrationMode === 'manual' ? '按需' : '自动'}`} onPointerDown={(event) => event.preventDefault()} onClick={() => setIllustrationModeOpen((open) => !open)}>
                 <ImagePlus size={17} aria-hidden="true" /><span>配图</span><strong>{illustrationMode === 'none' ? '无图' : illustrationMode === 'manual' ? '按需' : '自动'}</strong>
               </button>
-              {illustrationModeOpen && <div className={`illustration-mode-menu${menuFlipped ? ' illustration-mode-menu-flipped' : ''}`} role="menu" aria-label="选择配图模式">
+              {illustrationModeOpen && <div className={`illustration-mode-menu${menuFlipped ? ' illustration-mode-menu-flipped' : ''}`} role="menu" aria-label="选择配图模式" style={menuShiftX ? { translate: `${menuShiftX}px 0` } : undefined}>
                 {([['none', '无图', '只写正文'], ['manual', '按需', '保存建议，手动生成'], ['auto', '自动', '自动生成插画']] as const).map(([mode, label, description]) => (
-                  <button key={mode} type="button" role="menuitemradio" aria-checked={illustrationMode === mode} onClick={() => { onIllustrationModeChange(mode); setIllustrationModeOpen(false); illustrationModeTriggerRef.current?.focus() }}>
+                  <button key={mode} type="button" role="menuitemradio" aria-checked={illustrationMode === mode} onPointerDown={(event) => event.preventDefault()} onClick={() => { onIllustrationModeChange(mode); setIllustrationModeOpen(false); focusTriggerUnlessTyping(illustrationModeTriggerRef.current) }}>
                     <span><strong>{label}</strong><small>{description}</small></span>{illustrationMode === mode && <Check size={15} aria-hidden="true" />}
                   </button>
                 ))}

@@ -1,4 +1,5 @@
 import type { IllustrationMode, NarrativePronoun, VisualPlan, WritingCharacterPlan, WritingSceneNotes, WritingTurnResult } from '../../domain/models'
+import { stripChapterOrderPrefixes } from '../../domain/chapterTitle'
 import type { StructuredOutput } from '../types'
 
 type JsonSchema = Record<string, unknown>
@@ -125,6 +126,12 @@ export function stringValue(value: unknown) {
 
 export function stringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean) : []
+}
+
+// 模型可能把序号前缀写进章节标题（规则见 domain/chapterTitle）；
+// 剥完为空（如模型只回“第一章”）视为未提供，沿用现有标题或应用回退标题。
+function normalizeChapterTitle(rawTitle: string): string | undefined {
+  return stripChapterOrderPrefixes(rawTitle) || undefined
 }
 
 function normalizeNarrativePronoun(value: unknown): NarrativePronoun {
@@ -473,7 +480,7 @@ export function parseWritingResult(content: string): WritingTurnResult {
         kind: 'prose',
         assistantNote: assistantNote || '正文已完成。',
         chapterAction: parsed.chapter_action === 'new' ? 'new' : 'continue',
-        chapterTitle: stringValue(parsed.prose?.chapter_title) || undefined,
+        chapterTitle: normalizeChapterTitle(stringValue(parsed.prose?.chapter_title)),
         paragraphs,
         chapterSummary: stringValue(parsed.chapter_summary) || undefined,
         sceneNotes: normalizeSceneNotes(parsed.scene_notes),

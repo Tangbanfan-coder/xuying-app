@@ -24,7 +24,7 @@ export interface ProseEvaluationEvent {
   occurredAt: number
   schemaVersion: 1
   appVersion: '0.1.0'
-  databaseVersion: 14
+  databaseVersion: 15
   proseRuleVersion: number
   projectId?: string
   messageId?: string
@@ -57,6 +57,9 @@ export type ProseStyleRuleCategory =
   | 'conditional-dialogue'
   | 'concept-label'
   | 'defensive-reframing'
+  // Statistical rhythm signal; intentionally shares the analyzer's category
+  // word so both sources aggregate under one label in evaluation data.
+  | 'rhythm'
 
 /**
  * Broad semantic categories returned by the optional text-model analyzer.

@@ -107,7 +107,7 @@ describe('SummaryHistoryDialog', () => {
 
     expect(await screen.findByText('正在读取章节摘要版本…')).toBeDefined()
     resolveVersions?.([])
-    expect(await screen.findByText(/第1章 · 雾港来信还没有摘要历史/)).toBeDefined()
+    expect(await screen.findByText(/第一章 · 雾港来信还没有摘要历史/)).toBeDefined()
   })
 
   it('renders a recoverable list error and retries without closing the dialog', async () => {
@@ -131,7 +131,7 @@ describe('SummaryHistoryDialog', () => {
     await user.click(within(oldVersionRow!).getByRole('button', { name: '恢复此版本' }))
 
     const confirmation = await screen.findByRole('alertdialog', { name: '恢复章节摘要？' })
-    expect(confirmation.textContent).toContain('第1章 · 雾港来信')
+    expect(confirmation.textContent).toContain('第一章 · 雾港来信')
     expect(confirmation.textContent).toContain('v1')
     expect(confirmation.textContent).toContain('会创建新的 restore 版本，历史不会被删除')
   })
@@ -160,7 +160,7 @@ describe('SummaryHistoryDialog', () => {
 
     await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith(projectId, 'chapter-one', 'summary-version-1'))
     await waitFor(() => expect(listVersions).toHaveBeenCalledTimes(2))
-    expect(await screen.findByText(/已将第1章 · 雾港来信恢复为 v1/)).toBeDefined()
+    expect(await screen.findByText(/已将第一章 · 雾港来信恢复为 v1/)).toBeDefined()
     const newestRow = screen.getAllByRole('listitem').find((row) => row.getAttribute('data-version') === '3')
     expect(newestRow?.getAttribute('aria-current')).toBe('true')
   })

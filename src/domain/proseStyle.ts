@@ -1,6 +1,6 @@
 import type { ProseStyleIssue, ProseStyleRuleCategory, ProseStyleSeverity } from './models'
 
-export const PROSE_STYLE_RULE_VERSION = 4
+export const PROSE_STYLE_RULE_VERSION = 5
 
 export interface ProseStyleRuleDefinition {
   id: string
@@ -134,6 +134,28 @@ const rules: RuleMatcher[] = [
     detect: (text, all, index) => index === all.length - 1
       ? matches(text, /(?:终于明白|这才明白|仿佛预示着|命运的齿轮|人生的意义|一切才刚刚开始|新的篇章)[^。！？]{0,18}[。！？]?$/g)
       : [],
+  },
+  {
+    // Statistical rule: no lexical whitelist to maintain. It measures sentence
+    // length evenness, so paraphrased "new" AI cadence still trips it.
+    id: 'uniform-sentence-rhythm', category: 'rhythm', severity: 'hint',
+    explanation: '整段句子长度高度均匀，节奏像匀速流水，缺少长短交错的呼吸感。',
+    rewriteGoal: '拆分或合并句子制造长短差，让关键信息落在最短的句子上。',
+    badExamples: ['他停下脚步。目光落在桌上。那里放着一封信。信封没有封口。'],
+    goodExamples: ['他推开房门。空的。只有桌上一只杯子，插着一支早就干透的花，花瓣碰一下就掉。'],
+    detect: (text) => {
+      const parts = sentences(text)
+      if (parts.length < 4 || text.length < 60) return []
+      const lengths = parts.map((part) => part.replace(/[\s，、。！？!?；;：“”‘’「」『』（）()]/g, '').length)
+      const total = lengths.reduce((sum, length) => sum + length, 0)
+      const mean = total / lengths.length
+      if (mean < 8) return []
+      const variance = lengths.reduce((sum, length) => sum + (length - mean) ** 2, 0) / lengths.length
+      const cv = Math.sqrt(variance) / mean
+      // Threshold is a first-cut calibration against typical model cadence
+      // (CV well under 0.3); revisit after replaying real stored prose.
+      return cv <= 0.3 ? [`句长 ${lengths.join('/')}`] : []
+    },
   },
 ]
 

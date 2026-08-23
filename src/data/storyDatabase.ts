@@ -41,6 +41,7 @@ import { DEFAULT_ILLUSTRATION_STYLE_ID, getIllustrationStylePreset } from '../do
 import { resolveIllustrationReferences } from '../domain/illustrationReferences'
 import { materializeWritingSceneNotes, reconcileForeshadowing } from '../domain/foreshadowing'
 import { createParagraphFingerprint, hasWritingContentOverlap, hashText as hashTextImpl, normalizeText as normalizeParagraphText } from '../domain/paragraphs'
+import { stripChapterOrderPrefixes } from '../domain/chapterTitle'
 import { loadGlobalWritingInstructions } from '../providers/config'
 import { detectProseStyleIssues, mergeProseStyleIssues, PROSE_STYLE_RULE_VERSION } from '../domain/proseStyle'
 
@@ -247,6 +248,17 @@ export class StoryDatabase extends Dexie {
       projects: 'id, updatedAt, lastOpenedAt', messages: 'id, projectId, [projectId+order], createdAt, backgroundTaskId, turnId',
       chapters: 'id, projectId, [projectId+order], updatedAt', characters: 'id, projectId, [projectId+createdAt], status', illustrations: 'id, projectId, [projectId+createdAt], status, turnId', styles: 'id, &projectId, updatedAt', scenes: 'id, projectId, [projectId+order], createdAt, turnId', paragraphs: 'id, projectId, sourceType, [projectId+sourceType], [projectId+chapterId], [projectId+messageId], fingerprint, createdAt', summaryVersions: 'id, projectId, chapterId, [projectId+chapterId], &[projectId+chapterId+version], createdAt', feedback: 'id, projectId, messageId, [projectId+messageId], &targetKey, [projectId+updatedAt], updatedAt', preferenceSignals: 'id, projectId, feedbackId, fingerprint, [projectId+updatedAt], updatedAt', writingCandidates: 'id, projectId, turnId, proseMessageId, [projectId+turnId], [projectId+updatedAt], updatedAt', styleCorpusSources: 'id, &fingerprint, createdAt, updatedAt', styleCorpusFragments: 'id, sourceId, fingerprint, confirmed, usageCount, updatedAt', styleCorpusBindings: 'id, fragmentId, scope, projectId, state, [scope+state], [projectId+state], updatedAt', evaluationEvents: 'id, eventType, occurredAt, projectId, [projectId+occurredAt]',
     })
+    // Chapter titles are stored without the “第N章” order prefix; the order is
+    // prepended by the app wherever it displays an ordered title. Legacy rows
+    // written before that convention accumulated duplicated prefixes.
+    this.version(15)
+      .stores({
+        projects: 'id, updatedAt, lastOpenedAt', messages: 'id, projectId, [projectId+order], createdAt, backgroundTaskId, turnId',
+        chapters: 'id, projectId, [projectId+order], updatedAt', characters: 'id, projectId, [projectId+createdAt], status', illustrations: 'id, projectId, [projectId+createdAt], status, turnId', styles: 'id, &projectId, updatedAt', scenes: 'id, projectId, [projectId+order], createdAt, turnId', paragraphs: 'id, projectId, sourceType, [projectId+sourceType], [projectId+chapterId], [projectId+messageId], fingerprint, createdAt', summaryVersions: 'id, projectId, chapterId, [projectId+chapterId], &[projectId+chapterId+version], createdAt', feedback: 'id, projectId, messageId, [projectId+messageId], &targetKey, [projectId+updatedAt], updatedAt', preferenceSignals: 'id, projectId, feedbackId, fingerprint, [projectId+updatedAt], updatedAt', writingCandidates: 'id, projectId, turnId, proseMessageId, [projectId+turnId], [projectId+updatedAt], updatedAt', styleCorpusSources: 'id, &fingerprint, createdAt, updatedAt', styleCorpusFragments: 'id, sourceId, fingerprint, confirmed, usageCount, updatedAt', styleCorpusBindings: 'id, fragmentId, scope, projectId, state, [scope+state], [projectId+state], updatedAt', evaluationEvents: 'id, eventType, occurredAt, projectId, [projectId+occurredAt]',
+      })
+      .upgrade(async (transaction) => {
+        await sanitizeChapterTitlesFromV14(transaction)
+      })
   }
 }
 
@@ -295,7 +307,7 @@ export async function recordProseEvaluationEvent(event: Omit<ProseEvaluationEven
       )).first()
       if (duplicate) return
     }
-    await storyDatabase.evaluationEvents.add({ ...event, id: createId('evaluation'), occurredAt, schemaVersion: 1, appVersion: '0.1.0', databaseVersion: 14, proseRuleVersion: event.proseRuleVersion ?? PROSE_RULE_VERSION_FALLBACK })
+    await storyDatabase.evaluationEvents.add({ ...event, id: createId('evaluation'), occurredAt, schemaVersion: 1, appVersion: '0.1.0', databaseVersion: 15, proseRuleVersion: event.proseRuleVersion ?? PROSE_RULE_VERSION_FALLBACK })
     await storyDatabase.evaluationEvents.where('occurredAt').below(occurredAt - EVALUATION_MAX_AGE_MS).delete()
     const count = await storyDatabase.evaluationEvents.count()
     if (count > EVALUATION_MAX_EVENTS) {
@@ -513,6 +525,16 @@ async function backfillStyleIssuesFromV9(transaction: Transaction) {
       styleRuleVersion: paragraph.styleRuleVersion,
     })))
   })
+}
+
+async function sanitizeChapterTitlesFromV14(transaction: Transaction) {
+  const chapterTable = transaction.table('chapters') as Table<Chapter, string>
+  const legacyChapters = await chapterTable.toArray()
+  await Promise.all(legacyChapters.map((chapter) => {
+    const nextTitle = stripChapterOrderPrefixes(chapter.title)
+    if (nextTitle === chapter.title) return undefined
+    return chapterTable.update(chapter.id, { title: nextTitle })
+  }))
 }
 
 function emptyStyleCorpusLabels(): StyleCorpusLabels {
@@ -2132,7 +2154,7 @@ export async function completeWritingTurn(
         targetChapter = {
           id: chapterId,
           projectId,
-          title: result.chapterTitle || `第${chapterOrder}章`,
+          title: result.chapterTitle || '',
           order: chapterOrder,
           content: result.paragraphs.join('\n\n'),
           status: 'draft',

@@ -107,7 +107,7 @@ describe('writing result recovery', () => {
     const result = asProse(parseWritingResult(JSON.stringify({
       assistant_note: '本轮推进完成。',
       chapter_action: 'new',
-      prose: { chapter_title: '第二章', paragraphs: ['第一段正文。'] },
+      prose: { chapter_title: '雨夜追踪', paragraphs: ['第一段正文。'] },
       chapter_summary: '章节摘要。',
       scene_notes: { events: ['发生了事件'] },
       visual_plan: {
@@ -121,7 +121,7 @@ describe('writing result recovery', () => {
     expect(result).toMatchObject({
       assistantNote: '本轮推进完成。',
       chapterAction: 'new',
-      chapterTitle: '第二章',
+      chapterTitle: '雨夜追踪',
       paragraphs: ['第一段正文。'],
       chapterSummary: '章节摘要。',
       visualPlan: {

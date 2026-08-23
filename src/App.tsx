@@ -25,6 +25,7 @@ import WritingInstructionsDialog from './components/WritingInstructionsDialog'
 import SummaryHistoryDialog from './components/SummaryHistoryDialog'
 import StyleCorpusDialog from './components/StyleCorpusDialog'
 import ProseEvaluationDialog from './components/ProseEvaluationDialog'
+import { formatOrderedChapterTitle } from './domain/chapterTitle'
 import {
   applyParagraphRewrite,
   createProject,
@@ -502,7 +503,7 @@ export default function App() {
 
       <div className="story-stage" data-theme={workspace.project.themeId}>
         <section className="story-meta">
-          <h1>{visibleChapter?.title ?? workspace.project.title}</h1>
+          <h1>{visibleChapter ? formatOrderedChapterTitle(visibleChapter.order, visibleChapter.title) : workspace.project.title}</h1>
           <button
             className="character-count"
             type="button"
