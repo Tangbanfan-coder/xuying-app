@@ -531,7 +531,7 @@ describe('StoryDatabase v5-v6 summary version and feedback schema migrations', (
       upgraded = new StoryDatabase(name)
       await upgraded.open()
 
-      expect(upgraded.verno).toBe(14)
+      expect(upgraded.verno).toBe(15)
       expect(await upgraded.feedback.count()).toBe(0)
       const versions = await upgraded.summaryVersions.where('projectId').equals('project-v4').toArray()
       const migrated = versions.find((version) => version.chapterId === summarizedChapter.id)
@@ -562,6 +562,78 @@ describe('StoryDatabase v5-v6 summary version and feedback schema migrations', (
       expect(await upgraded.chapters.get(summarizedChapter.id)).toMatchObject(summarizedChapter)
       expect(await upgraded.chapters.get(noParagraphChapter.id)).toMatchObject(noParagraphChapter)
       expect(await upgraded.paragraphs.get(`paragraph-chapter-${summarizedChapter.id}-${hashText('过期内容')}-0`)).toBeDefined()
+    } finally {
+      legacy.close()
+      upgraded?.close()
+      await Dexie.delete(name)
+    }
+  })
+})
+
+describe('StoryDatabase v15 chapter title sanitization migration', () => {
+  it('strips accumulated order prefixes from legacy titles and preserves clean titles', async () => {
+    const name = `chapter-title-migration-${Date.now()}-${Math.random()}`
+    const legacy = new Dexie(name)
+    let upgraded: StoryDatabase | undefined
+
+    const pollutedChapter: Chapter = {
+      id: 'chapter-v15-polluted',
+      projectId: 'project-v15',
+      title: '第一章 第一章 初到雾港',
+      order: 1,
+      content: '正文。',
+      status: 'draft',
+      createdAt: 1,
+      updatedAt: 2,
+    }
+    const gluedChapter: Chapter = {
+      id: 'chapter-v15-glued',
+      projectId: 'project-v15',
+      title: '第二章雨夜追踪',
+      order: 2,
+      content: '正文。',
+      status: 'draft',
+      createdAt: 3,
+      updatedAt: 4,
+    }
+    const purePrefixChapter: Chapter = {
+      id: 'chapter-v15-pure-prefix',
+      projectId: 'project-v15',
+      title: '第三章',
+      order: 3,
+      content: '正文。',
+      status: 'draft',
+      createdAt: 5,
+      updatedAt: 6,
+    }
+    const cleanChapter: Chapter = {
+      id: 'chapter-v15-clean',
+      projectId: 'project-v15',
+      title: '尾声',
+      order: 4,
+      content: '正文。',
+      status: 'draft',
+      createdAt: 7,
+      updatedAt: 8,
+    }
+
+    try {
+      legacy.version(14).stores({
+        projects: 'id, updatedAt, lastOpenedAt', messages: 'id, projectId, [projectId+order], createdAt, backgroundTaskId, turnId',
+        chapters: 'id, projectId, [projectId+order], updatedAt', characters: 'id, projectId, [projectId+createdAt], status', illustrations: 'id, projectId, [projectId+createdAt], status, turnId', styles: 'id, &projectId, updatedAt', scenes: 'id, projectId, [projectId+order], createdAt, turnId', paragraphs: 'id, projectId, sourceType, [projectId+sourceType], [projectId+chapterId], [projectId+messageId], fingerprint, createdAt', summaryVersions: 'id, projectId, chapterId, [projectId+chapterId], &[projectId+chapterId+version], createdAt', feedback: 'id, projectId, messageId, [projectId+messageId], &targetKey, [projectId+updatedAt], updatedAt', preferenceSignals: 'id, projectId, feedbackId, fingerprint, [projectId+updatedAt], updatedAt', writingCandidates: 'id, projectId, turnId, proseMessageId, [projectId+turnId], [projectId+updatedAt], updatedAt', styleCorpusSources: 'id, &fingerprint, createdAt, updatedAt', styleCorpusFragments: 'id, sourceId, fingerprint, confirmed, usageCount, updatedAt', styleCorpusBindings: 'id, fragmentId, scope, projectId, state, [scope+state], [projectId+state], updatedAt', evaluationEvents: 'id, eventType, occurredAt, projectId, [projectId+occurredAt]',
+      })
+      await legacy.open()
+      await legacy.table<Chapter, string>('chapters').bulkAdd([pollutedChapter, gluedChapter, purePrefixChapter, cleanChapter])
+      legacy.close()
+
+      upgraded = new StoryDatabase(name)
+      await upgraded.open()
+
+      expect(upgraded.verno).toBe(15)
+      expect(await upgraded.chapters.get(pollutedChapter.id)).toMatchObject({ title: '初到雾港' })
+      expect(await upgraded.chapters.get(gluedChapter.id)).toMatchObject({ title: '雨夜追踪' })
+      expect(await upgraded.chapters.get(purePrefixChapter.id)).toMatchObject({ title: '' })
+      expect(await upgraded.chapters.get(cleanChapter.id)).toMatchObject(cleanChapter)
     } finally {
       legacy.close()
       upgraded?.close()

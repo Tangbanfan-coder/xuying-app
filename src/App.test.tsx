@@ -349,6 +349,28 @@ beforeEach(() => {
 
 afterEach(() => cleanup())
 
+describe('story heading', () => {
+  it('prepends the chapter number by order instead of relying on stored titles', async () => {
+    databaseMocks.loadProjectWorkspace.mockResolvedValue({
+      ...workspace,
+      chapters: [{
+        id: 'chapter-ordered',
+        projectId: project.id,
+        title: '雾港来信',
+        order: 3,
+        content: '正文',
+        status: 'draft',
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+    })
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '第三章 · 雾港来信' })).toBeDefined()
+  })
+})
+
 describe('empty project library', () => {
   it('keeps a fresh install empty and renders a usable first-project state', async () => {
     databaseMocks.listProjects.mockResolvedValue([])

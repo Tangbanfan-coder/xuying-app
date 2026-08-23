@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Check, Clock3, FileText, History, LoaderCircle, RotateCcw, TriangleAlert, X } from 'lucide-react'
 import type { Chapter, SummaryVersion, SummaryVersionReason } from '../domain/models'
+import { formatOrderedChapterTitle } from '../domain/chapterTitle'
 import { usePresence } from '../hooks/usePresence'
 import ConfirmDialog from './ConfirmDialog'
 
@@ -22,7 +23,7 @@ const reasonLabels: Record<SummaryVersionReason, string> = {
 }
 
 function chapterLabel(chapter: Chapter) {
-  return `第${chapter.order}章 · ${chapter.title.trim() || '未命名章节'}`
+  return formatOrderedChapterTitle(chapter.order, chapter.title)
 }
 
 function formatTimestamp(timestamp: number) {

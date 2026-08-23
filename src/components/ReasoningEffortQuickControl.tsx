@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { LEGACY_REASONING_EFFORT_OPTIONS, normalizeReasoningEffortSelection } from '../providers/endpointReasoningAdapters'
 import type { ReasoningEffort, ReasoningEffortOption } from '../providers/types'
 import { usePresence } from '../hooks/usePresence'
+import { focusTriggerUnlessTyping, isComposerInputFocused } from '../utils/menuFocus'
 
 interface Props {
   value: ReasoningEffort | undefined
@@ -29,7 +30,7 @@ export default function ReasoningEffortQuickControl({ value, onChange, options =
       if (event.key !== 'Escape') return
       event.preventDefault()
       setOpen(false)
-      triggerRef.current?.focus()
+      focusTriggerUnlessTyping(triggerRef.current)
     }
     document.addEventListener('pointerdown', closeOnOutsidePointer)
     window.addEventListener('keydown', closeOnEscape)
@@ -46,6 +47,8 @@ export default function ReasoningEffortQuickControl({ value, onChange, options =
   function openMenu(focusCurrent = false) {
     setOpen(true)
     window.requestAnimationFrame(() => {
+      // 输入框持焦（软键盘打开）时不抢焦点，避免键盘被收起
+      if (isComposerInputFocused()) return
       const index = focusCurrent ? effectiveOptions.findIndex((option) => option.value === current) : 0
       focusOption(Math.max(0, index))
     })
@@ -54,7 +57,7 @@ export default function ReasoningEffortQuickControl({ value, onChange, options =
   function choose(next: ReasoningEffort) {
     onChange(next)
     setOpen(false)
-    triggerRef.current?.focus()
+    focusTriggerUnlessTyping(triggerRef.current)
   }
 
   return (
@@ -67,6 +70,7 @@ export default function ReasoningEffortQuickControl({ value, onChange, options =
         aria-expanded={open}
         aria-label={`文本模型思考等级：${currentOption.label}`}
         onClick={() => open ? setOpen(false) : openMenu(true)}
+        onPointerDown={(event) => event.preventDefault()}
         onKeyDown={(event) => {
           if (event.key === 'ArrowDown') {
             event.preventDefault()
@@ -95,6 +99,7 @@ export default function ReasoningEffortQuickControl({ value, onChange, options =
                 type="button"
                 role="menuitemradio"
                 aria-checked={selected}
+                onPointerDown={(event) => event.preventDefault()}
                 onClick={() => choose(option.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'ArrowDown') {

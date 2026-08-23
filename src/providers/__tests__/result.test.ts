@@ -7,7 +7,7 @@ describe('parseWritingResult turn kinds', () => {
     const result = parseWritingResult(JSON.stringify({
       assistant_note: '正文完成。',
       chapter_action: 'new',
-      prose: { chapter_title: '第一章', paragraphs: ['第一段。', '第二段。'] },
+      prose: { chapter_title: '雾港来信', paragraphs: ['第一段。', '第二段。'] },
       chapter_summary: '本章提要。',
       scene_notes: { events: ['发生了事件'] },
     }))
@@ -16,7 +16,7 @@ describe('parseWritingResult turn kinds', () => {
       kind: 'prose',
       assistantNote: '正文完成。',
       chapterAction: 'new',
-      chapterTitle: '第一章',
+      chapterTitle: '雾港来信',
       paragraphs: ['第一段。', '第二段。'],
       chapterSummary: '本章提要。',
     })
@@ -99,6 +99,31 @@ describe('parseWritingResult turn kinds', () => {
       Object.values(schema).forEach(visit)
     }
     visit(root)
+  })
+})
+
+describe('parseWritingResult chapter_title 序号前缀剥离', () => {
+  function parseWithTitle(chapterTitle: string) {
+    const result = parseWritingResult(JSON.stringify({
+      assistant_note: '正文完成。',
+      chapter_action: 'continue',
+      prose: { chapter_title: chapterTitle, paragraphs: ['第一段。'] },
+    }))
+    if (result.kind !== 'prose') throw new Error('expected prose')
+    return result
+  }
+
+  it('剥掉模型模仿展示格式加上的序号前缀，含污染后的多层前缀', () => {
+    expect(parseWithTitle('第一章 雾港来信')).toMatchObject({ chapterTitle: '雾港来信' })
+    expect(parseWithTitle('第12章：雾港来信')).toMatchObject({ chapterTitle: '雾港来信' })
+    expect(parseWithTitle('第十二章·雾港来信')).toMatchObject({ chapterTitle: '雾港来信' })
+    expect(parseWithTitle('第一章 第一章 雾港来信')).toMatchObject({ chapterTitle: '雾港来信' })
+    expect(parseWithTitle('第一章第一章 雾港来信')).toMatchObject({ chapterTitle: '雾港来信' })
+  })
+
+  it('纯序号视为未提供标题，普通标题原样保留', () => {
+    expect(parseWithTitle('第一章').chapterTitle).toBeUndefined()
+    expect(parseWithTitle('雨夜追踪')).toMatchObject({ chapterTitle: '雨夜追踪' })
   })
 })
 

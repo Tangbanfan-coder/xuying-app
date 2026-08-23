@@ -299,7 +299,7 @@ label {
 .assistant-notice.failed svg { color: #d77f84; }
 .assistant-notice.cancelled { color: var(--story-muted); }
 .assistant-notice.cancelled svg { color: var(--story-accent); }
-.assistant-notice > span { min-width: 0; }
+.assistant-notice > span { min-width: 0; overflow-wrap: anywhere; }
 .notice-retry {
   flex: none;
   display: inline-flex;

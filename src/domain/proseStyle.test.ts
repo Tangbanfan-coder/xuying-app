@@ -55,4 +55,19 @@ describe('detectProseStyleIssues', () => {
     expect(flagged.every((issues) => issues.some((issue) => issue.ruleId === 'defensive-benefactive-reframing'))).toBe(true)
     expect(detectProseStyleIssues(['我这是第一次来，不认识路。', '我这是在帮你拿书。']).every((issues) => issues.length === 0)).toBe(true)
   })
+
+  it('flags statistically even sentence rhythm without any lexical whitelist', () => {
+    const uniform = '他沿着走廊一直往前走，脚步声在身后慢慢散开。走廊两侧挂着几幅泛黄的旧画。画框边缘落了薄薄的一层灰。尽头的窗户透进来一小片发白的光。'
+    const issue = detectProseStyleIssues([uniform])[0].find((item) => item.ruleId === 'uniform-sentence-rhythm')
+    expect(issue).toBeDefined()
+    expect(issue?.severity).toBe('hint')
+    expect(issue?.matchedText).toMatch(/^句长 \d+(\/\d+){3}$/)
+  })
+
+  it('keeps varied or short prose out of the rhythm rule', () => {
+    const varied = '他推开房门。空的。桌上一只杯子里插着一支早就干透的花，花瓣碰一下就掉了下来。他在门口站了很久，最后还是把门轻轻带上了，像什么都没有看见一样。'
+    expect(detectProseStyleIssues([varied])[0].some((issue) => issue.ruleId === 'uniform-sentence-rhythm')).toBe(false)
+    expect(detectProseStyleIssues(['他停下脚步。目光落在桌上。那里放着一封信。信封没有封口。'])[0]).toEqual([])
+    expect(detectProseStyleIssues(['他沿着走廊一直往前走，脚步声在身后慢慢散开。走廊两侧挂着几幅泛黄的旧画。'])[0]).toEqual([])
+  })
 })

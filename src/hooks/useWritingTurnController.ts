@@ -83,7 +83,13 @@ function contextUsageReminderTier(plan: ContextBudgetPlan): ContextUsageReminder
 }
 
 /** Semantic analysis is auxiliary: it never delays or invalidates a saved turn. */
-function scheduleModelProseAnalysis(projectId: string, nextWorkspace: ProjectWorkspace, textProvider: ProviderSettings['text'], refreshWorkspace: (projectId: string) => Promise<ProjectWorkspace | null | undefined>) {
+function scheduleModelProseAnalysis(
+  projectId: string,
+  nextWorkspace: ProjectWorkspace,
+  textProvider: ProviderSettings['text'],
+  refreshWorkspace: (projectId: string) => Promise<ProjectWorkspace | null | undefined>,
+  showToast: (text: string, kind?: 'success' | 'error') => void,
+) {
   const proseMessage = [...nextWorkspace.messages].reverse().find((message) => message.kind === 'prose')
   if (!proseMessage?.paragraphs?.length) return
   void analyzeProseStyle({ paragraphs: proseMessage.paragraphs }, textProvider, browserTransport)
@@ -95,7 +101,12 @@ function scheduleModelProseAnalysis(projectId: string, nextWorkspace: ProjectWor
       modelAnalysisVersion: PROSE_MODEL_ANALYSIS_VERSION,
     }))
     .then(() => refreshWorkspace(projectId))
-    .catch(() => undefined)
+    .catch((cause: unknown) => {
+      // A failed auxiliary pass must stay visible: otherwise the panel silently
+      // degrades to local rules only and users cannot tell why nothing shows up.
+      console.warn('[prose-analysis] semantic analysis failed', cause)
+      showToast('正文语义风检未完成，当前仅显示规则检测结果', 'error')
+    })
 }
 
 /** Owns the writing transaction, streaming lifecycle, and context usage state. */
@@ -308,7 +319,7 @@ export function useWritingTurnController({
       setStreamingText('')
       const nextWorkspace = await refreshWorkspace(projectId)
       await refreshProjects()
-      if (result.kind === 'prose' && nextWorkspace) scheduleModelProseAnalysis(projectId, nextWorkspace, textProvider, refreshWorkspace)
+      if (result.kind === 'prose' && nextWorkspace) scheduleModelProseAnalysis(projectId, nextWorkspace, textProvider, refreshWorkspace, showToast)
       if (nextWorkspace) await onWritingCompleted({ result, nextWorkspace, previousIllustrationIds, illustrationMode })
       else if (result.kind === 'prose') showToast('正文已保存')
       if (contextReminder) showToast(contextReminder.text, contextReminder.kind)
@@ -540,7 +551,7 @@ export function useWritingTurnController({
       setWritingCandidate(undefined)
       const nextWorkspace = await refreshWorkspace(workspace.project.id)
       await refreshProjects()
-      if (nextWorkspace) scheduleModelProseAnalysis(workspace.project.id, nextWorkspace, textProvider, refreshWorkspace)
+      if (nextWorkspace) scheduleModelProseAnalysis(workspace.project.id, nextWorkspace, textProvider, refreshWorkspace, showToast)
       if (nextWorkspace) await onWritingCompleted({
         result: adopted.result,
         nextWorkspace,

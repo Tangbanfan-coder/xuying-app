@@ -221,7 +221,7 @@ export default function SettingsDrawer({
 
               <section className="settings-section" aria-labelledby="settings-categories">
                 <h3 id="settings-categories">分类</h3>
-                <div className="settings-navigation-list">
+                <div className="settings-navigation-stack">
                   <button type="button" onClick={() => navigateToPage('writing')}>
                     <ScrollText size={18} aria-hidden="true" />
                     <span><strong>写作</strong><small>创作设定、风格语料库与文风优化数据</small></span>
@@ -459,7 +459,7 @@ export default function SettingsDrawer({
           {page === 'providers' && (
             <section className="settings-section" aria-labelledby="model-service-settings">
               <h3 id="model-service-settings">模型服务</h3>
-              <div className="settings-navigation-list">
+              <div className="settings-navigation-stack">
                 <button type="button" onClick={() => onOpenProviderSettings('text')}>
                   <FileText size={18} aria-hidden="true" />
                   <span><strong>文本模型</strong><small>{providerSummary(providerSettings.text)}</small></span>
