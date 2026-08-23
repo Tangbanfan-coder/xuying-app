@@ -29,4 +29,34 @@ describe('ReasoningEffortQuickControl', () => {
     await user.click(screen.getByRole('button', { name: '外部' }))
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
   })
+
+  it('renders caller-provided native effort values and persists max selection', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const options = [
+      { value: 'auto', label: '自动' },
+      { value: 'low', label: '低' },
+      { value: 'high', label: '高' },
+      { value: 'max', label: '最大' },
+    ] as const
+    render(<ReasoningEffortQuickControl value="auto" options={options} onChange={onChange} />)
+
+    await user.click(screen.getByRole('button', { name: '文本模型思考等级：自动' }))
+    expect(screen.getByRole('menuitemradio', { name: '低' })).toBeDefined()
+    expect(screen.getByRole('menuitemradio', { name: '高' })).toBeDefined()
+    expect(screen.getByRole('menuitemradio', { name: '最大' })).toBeDefined()
+    expect(screen.queryByRole('menuitemradio', { name: '中' })).toBeNull()
+    await user.click(screen.getByRole('menuitemradio', { name: '最大' }))
+    expect(onChange).toHaveBeenCalledWith('max')
+  })
+
+  it('maps a stale non-auto value to the supplied toggle opening option', () => {
+    const options = [
+      { value: 'auto', label: '自动' },
+      { value: 'low', label: '开启' },
+    ] as const
+    render(<ReasoningEffortQuickControl value="high" options={options} onChange={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: '文本模型思考等级：开启' })).toBeDefined()
+  })
 })
