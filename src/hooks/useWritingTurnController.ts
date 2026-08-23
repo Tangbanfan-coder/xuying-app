@@ -109,6 +109,14 @@ function scheduleModelProseAnalysis(
     })
 }
 
+/**
+ * Streaming deltas arrive far faster than anyone can read them, and each
+ * uncoalesced update costs a full main-thread parse of the accumulated text
+ * plus an App-wide render. 100ms keeps the stream visibly live while capping
+ * that work at ~10 updates/s regardless of transport burst rate.
+ */
+const STREAMING_FLUSH_INTERVAL_MS = 100
+
 /** Owns the writing transaction, streaming lifecycle, and context usage state. */
 export function useWritingTurnController({
   workspace,
@@ -132,9 +140,14 @@ export function useWritingTurnController({
   const [writingCandidate, setWritingCandidate] = useState<WritingCandidate>()
   const generationRef = useRef<GenerationControl>({ attemptId: 0, cancelled: false, phase: 'idle' })
   const streamingRawRef = useRef('')
+  const streamingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const contextUsageReminderTiersRef = useRef(new Map<string, ContextUsageReminderTier>())
   /** Bumped every time a real writing request publishes its own plan, so a stale boot-time recompute never overwrites it. */
   const contextPlanEpochRef = useRef(0)
+
+  useEffect(() => () => {
+    if (streamingFlushTimerRef.current !== undefined) clearTimeout(streamingFlushTimerRef.current)
+  }, [])
 
   useEffect(() => {
     if (!workspace || contextUsageProjectId === workspace.project.id) return
@@ -208,7 +221,28 @@ export function useWritingTurnController({
     generationRef.current.backgroundTaskId = undefined
     generationRef.current.abortController = undefined
 
+    const isCurrent = () => generationRef.current.attemptId === attemptId
+    const isCancelled = () => generationRef.current.cancelled
+
+    // Coalesced streaming publication: deltas only append to the raw buffer;
+    // parsing + state updates happen at most once per interval, and terminal
+    // paths always cancel the pending flush before writing their own final state.
+    const discardPendingStreamingFlush = () => {
+      if (streamingFlushTimerRef.current === undefined) return
+      clearTimeout(streamingFlushTimerRef.current)
+      streamingFlushTimerRef.current = undefined
+    }
+    const scheduleStreamingFlush = () => {
+      if (streamingFlushTimerRef.current !== undefined) return
+      streamingFlushTimerRef.current = setTimeout(() => {
+        streamingFlushTimerRef.current = undefined
+        if (!isCurrent()) return
+        setStreamingText(projectStreamingProse(streamingRawRef.current))
+      }, STREAMING_FLUSH_INTERVAL_MS)
+    }
+
     setGenerationPhase('running')
+    discardPendingStreamingFlush()
     streamingRawRef.current = ''
     setStreamingText('')
 
@@ -216,9 +250,6 @@ export function useWritingTurnController({
     let expectedBackgroundTaskId: string | undefined
     let selectedStyleFragmentIds: string[] = []
     let contextReminder: { text: string; kind: 'success' | 'error' } | undefined
-
-    const isCurrent = () => generationRef.current.attemptId === attemptId
-    const isCancelled = () => generationRef.current.cancelled
 
     try {
       const previousIllustrationIds = new Set(workspace.illustrations.map((illustration) => illustration.id))
@@ -293,7 +324,7 @@ export function useWritingTurnController({
         result = await generateWritingTurn(workspace, userText, textProvider, browserTransport, (delta) => {
           if (!isCurrent()) return
           streamingRawRef.current += delta
-          setStreamingText(projectStreamingProse(streamingRawRef.current))
+          scheduleStreamingFlush()
         }, { ...writingOptions, signal: abortController.signal })
       }
 
@@ -315,6 +346,7 @@ export function useWritingTurnController({
       await markStyleCorpusFragmentsUsed(selectedStyleFragmentIds).catch(() => undefined)
       void recordProseEvaluationEvent(writingTurnCompletedEvaluation({ projectId, corpusFragmentCount: selectedStyleFragmentIds.length, contextBudget: workspace.project.contextBudget ?? 'standard' })).catch(() => undefined)
       if (expectedBackgroundTaskId) await acknowledgeBackgroundGenerationTask(expectedBackgroundTaskId)
+      discardPendingStreamingFlush()
       streamingRawRef.current = ''
       setStreamingText('')
       const nextWorkspace = await refreshWorkspace(projectId)
@@ -347,6 +379,7 @@ export function useWritingTurnController({
       return 'failed'
     } finally {
       if (isCurrent()) {
+        discardPendingStreamingFlush()
         generationRef.current.phase = 'idle'
         setGenerationPhase('idle')
         streamingRawRef.current = ''

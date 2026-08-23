@@ -263,7 +263,19 @@ label {
   overscroll-behavior: contain;
 }
 
-.timeline-entry { width: 100%; animation: message-in var(--motion-panel) var(--motion-enter-ease); }
+/*
+ * Off-screen entries skip layout/paint until they approach the viewport.
+ * `auto <length>` keeps a remembered size after first render, so scrolling
+ * back stays stable; the estimate only matters before an entry is ever shown.
+ * This is what keeps opening/rendering a long novel off the main thread's
+ * critical path — entries below the fold cost almost nothing.
+ */
+.timeline-entry {
+  width: 100%;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
+  animation: message-in var(--motion-panel) var(--motion-enter-ease);
+}
 
 .message-row { display: flex; }
 .user-row { justify-content: flex-end; }
@@ -1220,6 +1232,18 @@ label {
 .model-list button small { color: #7f7c74; font-size: 10px; }
 .model-list button > svg { flex: none; color: #d2b975; }
 .model-list > p { margin: 0; padding: 20px 12px; color: #8c8981; text-align: center; font-size: 12px; }
+.model-row { display: flex; align-items: stretch; gap: 6px; }
+.model-row + .model-row { margin-top: 6px; }
+.model-list .model-row > button { width: auto; }
+.model-list .model-row > button:first-child { min-width: 0; flex: 1; }
+.model-list .model-row-action { width: 44px; flex: none; justify-content: center; gap: 0; padding: 7px 0; color: #8f8c84; }
+.model-list .model-row-action:hover { border-color: #605a49; background: #24241f; }
+.model-list .model-row-action.saved { color: #d2b975; }
+.saved-models-hint { margin: 0; padding: 9px 12px 11px; border-top: 1px solid #34342f; color: #8d8a82; font-size: 11px; }
+
+.provider-model-select { position: relative; margin-bottom: 10px; }
+.provider-model-select .theme-select-menu { position: absolute; top: calc(100% + 6px); right: 0; left: 0; z-index: 5; max-height: 230px; overflow-y: auto; box-shadow: 0 14px 30px rgba(0, 0, 0, 0.38); }
+.provider-model-empty { margin: 0; padding: 16px 12px; color: #8c8981; text-align: center; font-size: 12px; }
 
 .reference-dialog-body { min-height: 0; flex: 1; padding: 17px 19px 20px; overflow-y: auto; }
 .character-select { position: relative; }
@@ -1606,6 +1630,11 @@ label {
 .app-shell[data-appearance="light"] .model-list button { color: #555c55; }
 .app-shell[data-appearance="light"] .model-list button:hover { background: #f0f2ed; }
 .app-shell[data-appearance="light"] .model-list button[aria-selected="true"] { border-color: #bfae78; background: #f3edda; color: #28251d; }
+.app-shell[data-appearance="light"] .model-list .model-row-action { color: #7d827b; }
+.app-shell[data-appearance="light"] .model-list .model-row-action:hover { border-color: #bfae78; background: #f0f2ed; }
+.app-shell[data-appearance="light"] .model-list .model-row-action.saved { color: #8a6f35; }
+.app-shell[data-appearance="light"] .saved-models-hint { border-color: #dfe1dc; color: #6d726b; }
+.app-shell[data-appearance="light"] .provider-model-empty { color: #6d726b; }
 .app-shell[data-appearance="light"] .app-toast { border-color: #c8c9c2; background: #ffffff; color: #2a2e2a; box-shadow: 0 10px 28px rgba(43, 47, 42, 0.16); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1702,6 +1731,10 @@ label {
 .rewrite-strength button:hover { background: #252520; color: #e7e4dc; }
 .rewrite-strength button[aria-checked="true"] { border-color: #8f7c4e; background: #302e27; color: #f0eadb; }
 .rewrite-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+.rewrite-versions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.rewrite-versions button { min-height: 30px; padding: 0 10px; border: 1px solid var(--border-color); border-radius: 999px; background: var(--control-bg); color: var(--muted-text); font-size: 12px; }
+.rewrite-versions button:hover { background: #252520; color: #e7e4dc; }
+.rewrite-versions button.active { border-color: #8f7c4e; background: #302e27; color: #f0eadb; }
 .rewrite-comparison section { min-width: 0; overflow-wrap: anywhere; }
 .rewrite-comparison h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted-text); }
 .rewrite-comparison p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -1764,11 +1797,13 @@ label {
 .app-shell[data-appearance="light"] .prose-optimize-trigger:hover { background: #eceee9; }
 .app-shell[data-appearance="light"] .rewrite-issues span { background: #f3edda; color: #8a7c52; }
 .app-shell[data-appearance="light"] .rewrite-strength button:hover,
+.app-shell[data-appearance="light"] .rewrite-versions button:hover,
 .app-shell[data-appearance="light"] .evaluation-options button:hover,
 .app-shell[data-appearance="light"] .evaluation-danger button:hover,
 .app-shell[data-appearance="light"] .rewrite-panel footer button:hover,
 .app-shell[data-appearance="light"] .style-corpus-toolbar button:not(.primary-button):hover { background: #f0f2ed; color: #242823; }
 .app-shell[data-appearance="light"] .rewrite-strength button[aria-checked="true"],
+.app-shell[data-appearance="light"] .rewrite-versions button.active,
 .app-shell[data-appearance="light"] .evaluation-options button[aria-checked="true"] { border-color: #b7a66f; background: #f3edda; color: #28251d; }
 .app-shell[data-appearance="light"] .rewrite-sheet-handle { background: #b8bcb5; }
 .app-shell[data-appearance="light"] .writing-candidate-sheet { border-color: #c9cdc6; background: #fffdf8; box-shadow: 0 22px 60px rgba(43, 47, 42, 0.19); }

@@ -22,6 +22,7 @@ const databaseMocks = vi.hoisted(() => ({
   getWritingCandidate: vi.fn(),
   getStyleCorpusSummary: vi.fn().mockResolvedValue({ sourceCount: 0, fragmentCount: 0 }),
   recordProseEvaluationEvent: vi.fn(() => Promise.resolve()),
+  recordProseEvaluationEvents: vi.fn(() => Promise.resolve()),
   saveModelProseAnalysis: vi.fn(() => Promise.resolve()),
   applyParagraphRewrite: vi.fn(),
   getActiveProjectId: vi.fn(),
@@ -52,6 +53,7 @@ const databaseMocks = vi.hoisted(() => ({
   toggleFeedback: vi.fn(),
   toggleFeedbackBatch: vi.fn(),
   upsertPreferenceSignal: vi.fn(),
+  upsertDerivedPreferenceSignal: vi.fn(),
   updateIllustrationMode: vi.fn(),
   updateCharacterProfile: vi.fn(),
   updateCharacterReferenceStyleMode: vi.fn(),
@@ -232,7 +234,8 @@ vi.mock('./domain/illustrationStyles', () => ({
     negativePrompt: '',
   }),
 }))
-vi.mock('./providers/config', () => ({
+vi.mock('./providers/config', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./providers/config')>()),
   loadProviderSettings: () => providerSettings,
   loadGlobalWritingInstructions: () => '',
   saveGlobalWritingInstructions: configMocks.saveGlobalWritingInstructions,
@@ -307,10 +310,12 @@ beforeEach(() => {
   databaseMocks.getLatestEditableWritingUserMessage.mockResolvedValue(undefined)
   databaseMocks.getWritingCandidate.mockResolvedValue(undefined)
   databaseMocks.recordProseEvaluationEvent.mockResolvedValue(undefined)
+  databaseMocks.recordProseEvaluationEvents.mockResolvedValue(undefined)
   databaseMocks.applyParagraphRewrite.mockResolvedValue(undefined)
   databaseMocks.toggleFeedback.mockResolvedValue({ id: 'feedback-1', verdict: 'down' })
   databaseMocks.toggleFeedbackBatch.mockResolvedValue([])
   databaseMocks.upsertPreferenceSignal.mockResolvedValue(undefined)
+  databaseMocks.upsertDerivedPreferenceSignal.mockResolvedValue(undefined)
   databaseMocks.saveLatestUserMessageRevision.mockResolvedValue(undefined)
   databaseMocks.storyDatabase.paragraphs.where.mockReturnValue({
     equals: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) }),
@@ -876,8 +881,8 @@ describe('prose feedback UI', () => {
     writingMocks.rewriteProseParagraph.mockReturnValue(new Promise<string>((resolve) => { resolveRewrite = resolve }))
     renderProse()
     await user.click(await screen.findByRole('button', { name: '优化第 1 段，1 个建议' }))
-    await user.click(screen.getByRole('button', { name: /生成建议稿/ }))
-    const generateButton = screen.getByRole('button', { name: '生成建议稿' })
+    const generateButton = screen.getByRole('button', { name: /生成建议稿/ })
+    await user.click(generateButton)
     await waitFor(() => expect((generateButton as HTMLButtonElement).disabled).toBe(true))
 
     await user.keyboard('{Escape}')
@@ -1016,6 +1021,9 @@ describe('prose feedback UI', () => {
       messageId: proseMessage.id, paragraphId: paragraph.id, originalFingerprint: paragraph.fingerprint,
       rewrittenText: '她把杯子推到桌子中央。',
     })))
+    await waitFor(() => expect(databaseMocks.upsertDerivedPreferenceSignal).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: project.id, signalKey: 'rewrite-stock-physical-reaction', dimension: 'description',
+    })))
   })
 
   it('语料使用计数失败时仍展示已经生成的段落建议稿', async () => {
@@ -1053,7 +1061,7 @@ describe('prose feedback UI', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '段落优化建议' })).toBeNull())
   })
 
-  it('切换强度清空旧建议，采用失败时保留面板并显示错误', async () => {
+  it('切换强度保留历史版本，可切回查看，采用失败时保留面板并显示错误', async () => {
     const user = userEvent.setup()
     providerSettings.text = { ...providerSettings.text, baseUrl: 'https://api.test/v1', model: 'rewrite-model' }
     const paragraph = {
@@ -1063,16 +1071,22 @@ describe('prose feedback UI', () => {
       styleIssues: [{ ruleId: 'stock-physical-reaction', category: 'stock-reaction' as const, severity: 'warning' as const, explanation: '动作模板化', rewriteGoal: '保留关键动作' }],
     }
     databaseMocks.listMessageParagraphsWithCurrentStyleIssues.mockResolvedValue([paragraph])
-    writingMocks.rewriteProseParagraph.mockResolvedValue('第一版建议。')
+    writingMocks.rewriteProseParagraph.mockResolvedValueOnce('第一版建议。').mockResolvedValueOnce('第二版建议。')
     databaseMocks.applyParagraphRewrite.mockRejectedValue(new Error('正文已变化'))
     renderProse()
     await user.click(await screen.findByRole('button', { name: '优化第 1 段，1 个建议' }))
     await user.click(screen.getByRole('button', { name: /生成建议稿/ }))
     expect(await screen.findByText('第一版建议。')).toBeDefined()
     await user.click(screen.getByRole('radio', { name: '强力' }))
-    expect(screen.queryByText('第一版建议。')).toBeNull()
-    await user.click(screen.getByRole('button', { name: /生成建议稿/ }))
-    await user.click(await screen.findByRole('button', { name: /采用建议稿/ }))
+    expect(screen.queryByText('第一版建议。')).not.toBeNull()
+    await user.click(screen.getByRole('button', { name: /重新生成/ }))
+    expect(await screen.findByText('第二版建议。')).toBeDefined()
+    expect(screen.getByRole('button', { name: 'v1·均衡' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'v2·强力' })).toBeDefined()
+    await user.click(screen.getByRole('button', { name: 'v1·均衡' }))
+    expect(await screen.findByText('第一版建议。')).toBeDefined()
+    expect(screen.queryByText('第二版建议。')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /采用建议稿/ }))
     expect((await screen.findByRole('alert')).textContent).toContain('正文已变化')
     expect(screen.getByRole('dialog', { name: '段落优化建议' })).toBeDefined()
   })

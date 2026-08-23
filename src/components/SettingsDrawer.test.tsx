@@ -203,8 +203,45 @@ describe('SettingsDrawer', () => {
     await user.click(screen.getByRole('button', { name: /模型服务/ }))
     await screen.findByRole('heading', { name: '模型服务', level: 3 })
     await waitFor(() => expect(document.querySelector('.settings-content--exiting')).toBeNull())
-    await user.click(screen.getByRole('button', { name: /图片模型/ }))
+    await user.click(screen.getByRole('button', { name: /^图片模型/ }))
     expect(onOpenProviderSettings).toHaveBeenCalledWith('image')
+  })
+
+  async function waitForProvidersPage() {
+    await screen.findByRole('heading', { name: '模型服务', level: 3 })
+    await waitFor(() => expect(document.querySelector('.settings-content--exiting')).toBeNull())
+  }
+
+  it('switches the active text model from the quick select on the model service page', async () => {
+    const user = userEvent.setup()
+    const onSwitchProviderModel = vi.fn()
+    const withSavedModels: ProviderSettings = {
+      ...providerSettings,
+      text: { ...providerSettings.text, savedModels: [{ id: 'test-model' }, { id: 'alt-model' }] },
+    }
+    renderDrawer({ providerSettings: withSavedModels, onSwitchProviderModel })
+
+    await user.click(screen.getByRole('button', { name: /^模型服务/ }))
+    await waitForProvidersPage()
+    await user.click(screen.getByRole('button', { name: /文本模型 · 文本服务/ }))
+    await user.click(screen.getByRole('option', { name: /alt-model/ }))
+
+    expect(onSwitchProviderModel).toHaveBeenCalledWith('text', 'alt-model')
+  })
+
+  it('shows an empty hint in the quick select when no models are saved', async () => {
+    const user = userEvent.setup()
+    const emptySettings: ProviderSettings = {
+      ...providerSettings,
+      text: { ...providerSettings.text, model: '' },
+    }
+    renderDrawer({ providerSettings: emptySettings })
+
+    await user.click(screen.getByRole('button', { name: /^模型服务/ }))
+    await waitForProvidersPage()
+    await user.click(screen.getByRole('button', { name: /未设置模型/ }))
+
+    expect(screen.getByText(/暂无常用模型/)).toBeDefined()
   })
 
   it('returns home with Escape from a subpage before closing', async () => {

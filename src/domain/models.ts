@@ -247,11 +247,11 @@ export interface Feedback {
 
 export type PreferenceDimension = 'plot' | 'character' | 'dialogue' | 'pace' | 'description' | 'rhetoric' | 'emotion' | 'ending'
 
-/** A text-free, reusable preference. Source feedback remains an UI record. */
+/** A text-free, reusable preference. Source feedback remains an UI record; signals derived from rewrite adoptions have no feedback record. */
 export interface PreferenceSignal {
   id: string
   projectId: string
-  feedbackId: string
+  feedbackId?: string
   verdict: FeedbackVerdict
   dimension: PreferenceDimension
   instruction: string

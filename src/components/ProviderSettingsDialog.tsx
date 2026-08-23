@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { Check, ChevronDown, Eye, EyeOff, LoaderCircle, PlugZap, Plus, Save, Search, Trash2, X } from 'lucide-react'
-import { createProviderConfig } from '../providers/config'
+import { createProviderConfig, savedModelPatch, syncActiveModelIntoSaved } from '../providers/config'
 import { browserTransport } from '../providers/browserTransport'
 import { listOpenAiModels } from '../providers/openAiCompatible'
 import { isModelKnown, lookupModelLimit, withModelMetadata } from '../providers/modelLimits'
@@ -9,7 +9,7 @@ import { capabilitiesForPreset, presetForCapabilities, resolveCapabilities, type
 import { resolveTextTransport } from '../providers/chatCompatibility'
 import { LEGACY_REASONING_EFFORT_OPTIONS, normalizeReasoningEffortSelection, resolveReasoningEffortOptions } from '../providers/endpointReasoningAdapters'
 import { secretStore } from '../providers/secretStore'
-import type { ImageEdits, ModelSummary, OutputTokenParameter, ProviderCapabilities, ProviderConfig, ProviderSettings, ProviderSlot, ReasoningEffortParameter, StructuredOutput, TextTransport, TokenizerStrategy, VisionInput } from '../providers/types'
+import type { ImageEdits, ModelSummary, OutputTokenParameter, ProviderCapabilities, ProviderConfig, ProviderSettings, ProviderSlot, ReasoningEffortParameter, SavedModelEntry, StructuredOutput, TextTransport, TokenizerStrategy, VisionInput } from '../providers/types'
 import { usePresence } from '../hooks/usePresence'
 import ConfirmDialog from './ConfirmDialog'
 
@@ -209,12 +209,62 @@ export default function ProviderSettingsDialog({ open, nested = false, settings,
 
   function updateCurrent(patch: Partial<ProviderConfig>) {
     setDraft((value) => {
-      const nextCurrent = { ...value[activeSlot], ...patch }
+      const nextCurrent = syncActiveModelIntoSaved({ ...value[activeSlot], ...patch })
       const key = listKey(activeSlot)
       const nextList = providersFor(value, activeSlot).map((provider) => provider.id === value[activeSlot].id ? nextCurrent : provider)
       return { ...value, [activeSlot]: nextCurrent, [key]: nextList }
     })
     setTestState((value) => ({ ...value, [current.id]: { status: 'idle' } }))
+  }
+
+  function toSavedEntry(model: ModelSummary): SavedModelEntry {
+    return {
+      id: model.id,
+      ...(model.ownedBy === undefined ? {} : { ownedBy: model.ownedBy }),
+      ...(model.contextLength === undefined ? {} : { contextLength: model.contextLength }),
+      ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
+    }
+  }
+
+  function addSavedModel(model: ModelSummary) {
+    const saved = current.savedModels ?? []
+    if (saved.some((entry) => entry.id === model.id)) return
+    updateCurrent({
+      savedModels: [...saved, toSavedEntry(model)],
+      // 收藏第一个模型且当前未选择模型时，直接把它设为当前使用
+      ...(current.model ? {} : savedModelPatch(toSavedEntry(model))),
+    })
+  }
+
+  function removeSavedModel(modelId: string) {
+    const saved = (current.savedModels ?? []).filter((entry) => entry.id !== modelId)
+    updateCurrent({
+      savedModels: saved,
+      // 移除正在使用的模型时一并清空选择，回到"未选择模型"状态
+      ...(current.model === modelId ? savedModelPatch({ id: '' }) : {}),
+    })
+  }
+
+  function switchToSavedModel(entry: SavedModelEntry) {
+    if (current.model === entry.id) return
+    updateCurrent(savedModelPatch(entry))
+  }
+
+  function selectFetchedModel(model: ModelSummary) {
+    const saved = current.savedModels ?? []
+    const existing = saved.find((entry) => entry.id === model.id)
+    // 已收藏的模型走完整记忆恢复，与"我的模型"区切换行为一致
+    if (existing) {
+      updateCurrent(savedModelPatch(existing))
+      return
+    }
+    updateCurrent({
+      ...withModelMetadata(current, model),
+      manualContextLength: current.manualContextLength,
+      manualMaxOutputTokens: current.manualMaxOutputTokens,
+      // 点击可用模型即设为当前并收藏；新模型无记忆，思考等级回到自动
+      savedModels: [...saved, toSavedEntry(model)],
+    })
   }
 
   function updateCapability(patch: Partial<NonNullable<ProviderCapabilities>>) {
@@ -320,7 +370,7 @@ export default function ProviderSettingsDialog({ open, nested = false, settings,
       const pathAdded = result.baseUrl !== current.baseUrl.trim().replace(/\/+$/, '')
       setTestState((value) => ({
         ...value,
-        [current.id]: { status: 'success', message: `${pathAdded ? '已自动补全兼容路径；' : ''}已获取 ${result.models.length} 个模型，请从下方选择` },
+        [current.id]: { status: 'success', message: `${pathAdded ? '已自动补全兼容路径；' : ''}已获取 ${result.models.length} 个模型，可添加多个到“我的模型”备用` },
       }))
     } catch (error) {
       setTestState((value) => ({
@@ -698,10 +748,36 @@ export default function ProviderSettingsDialog({ open, nested = false, settings,
             </span>
           </div>
 
+          {(current.savedModels?.length ?? 0) > 0 && (
+            <section className="model-picker saved-models" aria-label="我的模型">
+              <header>
+                <strong>我的模型</strong>
+                <span>{current.savedModels!.length} 个</span>
+              </header>
+              <div className="model-list">
+                {current.savedModels!.map((entry) => {
+                  const active = current.model === entry.id
+                  return (
+                    <div key={entry.id} className="model-row">
+                      <button type="button" aria-pressed={active} onClick={() => switchToSavedModel(entry)}>
+                        <span><strong>{entry.id}</strong>{entry.ownedBy && <small>{entry.ownedBy}</small>}</span>
+                        {active && <Check size={17} />}
+                      </button>
+                      <button type="button" className="model-row-action" aria-label={`移除 ${entry.id}`} onClick={() => removeSavedModel(entry.id)}>
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+              <p className="saved-models-hint">点击切换当前使用的模型；窗口与手动参数会跟随各自模型记忆。</p>
+            </section>
+          )}
+
           {currentModels.length > 0 && (
             <section className="model-picker" aria-label="可用模型">
               <header>
-                <strong>选择模型</strong>
+                <strong>可用模型</strong>
                 <span>{visibleModels.length} / {currentModels.length}</span>
               </header>
               {currentModels.length > 6 && (
@@ -711,16 +787,26 @@ export default function ProviderSettingsDialog({ open, nested = false, settings,
                 </label>
               )}
               <div className="model-list" role="listbox" aria-label="模型列表">
-                {visibleModels.map((model) => (
-                  <button key={model.id} type="button" role="option" aria-selected={current.model === model.id} onClick={() => updateCurrent({
-                    ...withModelMetadata(current, model),
-                    manualContextLength: current.manualContextLength,
-                    manualMaxOutputTokens: current.manualMaxOutputTokens,
-                  })}>
-                    <span><strong>{model.id}</strong>{model.ownedBy && <small>{model.ownedBy}</small>}</span>
-                    {current.model === model.id && <Check size={17} />}
-                  </button>
-                ))}
+                {visibleModels.map((model) => {
+                  const saved = (current.savedModels ?? []).some((entry) => entry.id === model.id)
+                  return (
+                    <div key={model.id} className="model-row">
+                      <button type="button" role="option" aria-selected={current.model === model.id} onClick={() => selectFetchedModel(model)}>
+                        <span><strong>{model.id}</strong>{model.ownedBy && <small>{model.ownedBy}</small>}</span>
+                        {current.model === model.id && <Check size={17} />}
+                      </button>
+                      <button
+                        type="button"
+                        className={`model-row-action${saved ? ' saved' : ''}`}
+                        aria-label={saved ? `从我的模型移除 ${model.id}` : `添加 ${model.id} 到我的模型`}
+                        aria-pressed={saved}
+                        onClick={() => saved ? removeSavedModel(model.id) : addSavedModel(model)}
+                      >
+                        {saved ? <Check size={15} /> : <Plus size={15} />}
+                      </button>
+                    </div>
+                  )
+                })}
                 {visibleModels.length === 0 && <p>没有匹配的模型，可以直接在上方填写 ID。</p>}
               </div>
             </section>

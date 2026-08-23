@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ImagePlus, LoaderCircle, Maximize2, Pencil, RefreshCcw, Save, Sparkles, Square, ThumbsDown, ThumbsUp, TriangleAlert, WandSparkles, X } from 'lucide-react'
 import { listMessageFeedback, listMessageParagraphsWithCurrentStyleIssues, storyDatabase, toggleFeedbackBatch, upsertPreferenceSignal } from '../data/storyDatabase'
@@ -48,7 +48,7 @@ function illustrationStatusText(illustration: IllustrationAsset | undefined, ima
   return `${label} · 等待手动生成`
 }
 
-export default function TimelineMessage({
+function TimelineMessage({
   message,
   illustration,
   onRetryIllustration,
@@ -188,6 +188,13 @@ export default function TimelineMessage({
     </div>
   )
 }
+
+/**
+ * Memoized so App-level state churn (streaming text, toasts, composer focus)
+ * does not re-render every historical entry; only entries whose own props
+ * changed (message, illustration, stage, busy flags) re-render.
+ */
+export default memo(TimelineMessage)
 
 function EditableUserMessage({ message, canEdit, onSave }: { message: ConversationMessage; canEdit?: boolean; onSave?: (message: ConversationMessage, text: string) => Promise<boolean> }) {
   const [editing, setEditing] = useState(false)
@@ -509,12 +516,19 @@ function WritingCandidatePanel({ open, message, candidate, onClose, onExited, on
   return createPortal(panel, document.querySelector('.story-stage') ?? document.querySelector('.app-shell') ?? document.body)
 }
 
+const REWRITE_STRENGTH_LABELS: Record<RewriteStrength, string> = { light: '轻度', balanced: '均衡', strong: '强力' }
+
+interface RewriteVersion { seq: number; strength: RewriteStrength; text: string }
+
 function RewritePanel({ open, message, paragraph, onClose, onExited, onRewrite, onApply }: { open: boolean; message: ConversationMessage; paragraph: StoredParagraph; onClose: () => void; onExited: () => void; onRewrite?: (input: { message: ConversationMessage; paragraph: StoredParagraph; strength: RewriteStrength }) => Promise<string>; onApply: (text: string) => Promise<void> }) {
   const [strength, setStrength] = useState<RewriteStrength>('balanced')
-  const [suggestion, setSuggestion] = useState('')
+  const [versions, setVersions] = useState<RewriteVersion[]>([])
+  const [activeSeq, setActiveSeq] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [applying, setApplying] = useState(false)
+  const nextVersionRef = useRef(1)
+  const activeVersion = versions.find((version) => version.seq === activeSeq)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const closeRequestedRef = useRef(false)
   const onCloseRef = useRef(onClose)
@@ -550,7 +564,13 @@ function RewritePanel({ open, message, paragraph, onClose, onExited, onRewrite, 
     if (!onRewrite || busy || applying) return
     setBusy(true)
     setError('')
-    try { setSuggestion(await onRewrite({ message, paragraph, strength })) } catch (cause) { setError(cause instanceof Error ? cause.message : '建议稿生成失败') } finally { setBusy(false) }
+    try {
+      const text = await onRewrite({ message, paragraph, strength })
+      const seq = nextVersionRef.current
+      nextVersionRef.current += 1
+      setVersions((prev) => [...prev, { seq, strength, text }])
+      setActiveSeq(seq)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '建议稿生成失败') } finally { setBusy(false) }
   }
 
   const panel = (
@@ -565,11 +585,11 @@ function RewritePanel({ open, message, paragraph, onClose, onExited, onRewrite, 
         <header className="rewrite-sheet-header"><strong>段落优化</strong><button ref={closeButtonRef} className="feedback-close" type="button" aria-label="关闭段落优化" onClick={requestClose}><X size={16} /></button></header>
         <div className="rewrite-sheet-content">
           <div className="rewrite-issues">{issues.map((issue) => <span key={issue.ruleId}>{issue.explanation}</span>)}</div>
-          <div className="rewrite-strength" role="radiogroup" aria-label="改写强度">{([['light','轻度'],['balanced','均衡'],['strong','强力']] as const).map(([value,label]) => <button key={value} type="button" role="radio" aria-checked={strength === value} disabled={busy || applying} onClick={() => { setStrength(value); setSuggestion(''); setError('') }}>{label}</button>)}</div>
-          <div className="rewrite-comparison"><section><h4>原文</h4><p>{paragraph.text}</p></section><section><h4>建议稿</h4>{suggestion ? <p>{suggestion}</p> : <p className="feedback-hint">生成后会显示在这里。</p>}</section></div>
+          <div className="rewrite-strength" role="radiogroup" aria-label="改写强度">{(['light','balanced','strong'] as const).map((value) => <button key={value} type="button" role="radio" aria-checked={strength === value} disabled={busy || applying} onClick={() => { setStrength(value); setError('') }}>{REWRITE_STRENGTH_LABELS[value]}</button>)}</div>
+          <div className="rewrite-comparison"><section><h4>原文</h4><p>{paragraph.text}</p></section><section><h4>建议稿</h4>{versions.length > 0 && <div className="rewrite-versions" role="group" aria-label="历史版本">{versions.map((version) => <button key={version.seq} type="button" className={version.seq === activeSeq ? 'active' : undefined} aria-pressed={version.seq === activeSeq} disabled={busy || applying} onClick={() => setActiveSeq(version.seq)}>v{version.seq}·{REWRITE_STRENGTH_LABELS[version.strength]}</button>)}</div>}{activeVersion ? <p>{activeVersion.text}</p> : <p className="feedback-hint">生成后会显示在这里。</p>}</section></div>
           {error && <p className="feedback-error" role="alert">{error}</p>}
         </div>
-        <footer><button type="button" disabled={busy || applying} onClick={requestClose}>保留原文</button>{suggestion ? <button className="primary" type="button" disabled={busy || applying} onClick={() => void (async () => { setApplying(true); setError(''); try { await onApply(suggestion); setApplying(false) } catch (cause) { setError(cause instanceof Error ? cause.message : '建议稿应用失败'); setApplying(false) } })()}>{applying ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{applying ? '应用中…' : '采用建议稿'}</button> : <button className="primary" type="button" disabled={busy || applying || !onRewrite} onClick={() => void generate()}>{busy ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}生成建议稿</button>}</footer>
+        <footer><button type="button" disabled={busy || applying} onClick={requestClose}>保留原文</button>{activeVersion ? <><button type="button" disabled={busy || applying || !onRewrite} onClick={() => void generate()}>{busy ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}重新生成</button><button className="primary" type="button" disabled={busy || applying} onClick={() => void (async () => { setApplying(true); setError(''); try { await onApply(activeVersion.text); setApplying(false) } catch (cause) { setError(cause instanceof Error ? cause.message : '建议稿应用失败'); setApplying(false) } })()}>{applying ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{applying ? '应用中…' : '采用建议稿'}</button></> : <button className="primary" type="button" disabled={busy || applying || !onRewrite} onClick={() => void generate()}>{busy ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}{busy ? '生成中…' : '生成建议稿'}</button>}</footer>
       </section>
     </div>
   )

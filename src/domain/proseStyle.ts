@@ -1,4 +1,4 @@
-import type { ProseStyleIssue, ProseStyleRuleCategory, ProseStyleSeverity } from './models'
+import type { PreferenceDimension, ProseStyleIssue, ProseStyleRuleCategory, ProseStyleSeverity } from './models'
 
 export const PROSE_STYLE_RULE_VERSION = 5
 
@@ -160,6 +160,33 @@ const rules: RuleMatcher[] = [
 ]
 
 export const PROSE_STYLE_RULES: readonly ProseStyleRuleDefinition[] = rules.map(({ detect: _detect, ...rule }) => rule)
+
+/**
+ * Generation-side preference wording per rule id, deliberately decoupled from
+ * rewriteGoal: rewrite goals are editor instructions ("delete X, write Y") and
+ * copying them would push generation toward e.g. zero-simile prose. These
+ * wordings only ban template pairings, never the rhetorical device itself, so
+ * user-specified styles can still override the tendency (CORE_RULES priority).
+ */
+const REWRITE_PREFERENCES: Record<string, { dimension: PreferenceDimension; instruction: string }> = {
+  'template-calm-as-everyday': { dimension: 'rhetoric', instruction: '少用“平静得像在讨论天气”式固定日常类比，改由当下的语速和小动作呈现平静' },
+  'contrast-not-but-density': { dimension: 'rhetoric', instruction: '少用“不是……而是……”式解释句，对白直接说、叙述给具体事实' },
+  'generic-animal-simile': { dimension: 'rhetoric', instruction: '少用“像受惊的兔子”类通用动物比喻套人物反应；确需比喻时用贴合人物身份和当下处境的新颖喻体' },
+  'conditional-dialogue-ultimatum': { dimension: 'dialogue', instruction: '少用“如果你再……我就再也不……”式预制誓言，让台词说出当下的具体打算或后果' },
+  'concept-label-this-is-called': { dimension: 'dialogue', instruction: '少用“这叫/这才叫+抽象名词”给行为贴概念标签，让人物给出具体理由或下一步动作' },
+  'defensive-benefactive-reframing': { dimension: 'dialogue', instruction: '少用先否认过错再包装成好意的辩解话术，让辩解落到具体动机或代价上' },
+  'abstract-emotion-telling': { dimension: 'emotion', instruction: '少用“一种复杂的情绪涌上心头”式抽象情绪命名，用有因果的动作、选择或身体感觉承载情绪' },
+  'stock-physical-reaction': { dimension: 'description', instruction: '少用呼吸一滞、眸光一闪等堆叠的身体反应，一段只保留最能改变现场关系的一项并写出后果' },
+  'dialogue-explained-afterward': { dimension: 'dialogue', instruction: '少用在对白后补“语气里带着……”式的同义解释，用改变场面的动作替代态度说明' },
+  'adjacent-sentence-repetition': { dimension: 'rhetoric', instruction: '少用相邻两句换词复述同一信息的写法，让后一句推进新动作或新事实' },
+  'mechanical-three-part-list': { dimension: 'rhetoric', instruction: '少用三连同构短句的机械排比，只在要点真有递进关系时使用排比' },
+  'generic-elevated-ending': { dimension: 'ending', instruction: '少用段尾抽象人生结论收束，用当前动作、物件或未解决的问题落地' },
+  'uniform-sentence-rhythm': { dimension: 'pace', instruction: '少用长度均匀的匀速句流，拆分或合并句子制造长短差' },
+}
+
+export function rewritePreferenceForRule(ruleId: string) {
+  return REWRITE_PREFERENCES[ruleId]
+}
 
 /**
  * Combines deterministic and semantic diagnostics without creating a second

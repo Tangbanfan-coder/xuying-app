@@ -35,6 +35,8 @@ interface Props {
   onOpenSummaryHistory: () => void
   providerSettings: ProviderSettings
   onOpenProviderSettings: (slot: ProviderSlot) => void
+  /** 从"我的模型"快速切换当前使用的模型；未提供时下拉只作展示。 */
+  onSwitchProviderModel?: (slot: ProviderSlot, modelId: string) => void
   appearanceMode: AppearanceMode
   onAppearanceChange: (mode: AppearanceMode) => void
 }
@@ -80,6 +82,7 @@ export default function SettingsDrawer({
   onOpenSummaryHistory,
   providerSettings,
   onOpenProviderSettings,
+  onSwitchProviderModel,
   appearanceMode,
   onAppearanceChange,
 }: Props) {
@@ -87,10 +90,11 @@ export default function SettingsDrawer({
   const wasOpenRef = useRef(false)
   const themeSelectRef = useRef<HTMLDivElement>(null)
   const styleSelectRef = useRef<HTMLDivElement>(null)
+  const modelSelectRefs = useRef<Partial<Record<ProviderSlot, HTMLDivElement | null>>>({})
   const [page, setPage] = useState<SettingsPage>('home')
   const [pageTransitionKey, setPageTransitionKey] = useState(0)
   const [pageExiting, setPageExiting] = useState(false)
-  const [openSelect, setOpenSelect] = useState<'theme' | 'style' | null>(null)
+  const [openSelect, setOpenSelect] = useState<'theme' | 'style' | 'model-text' | 'model-image' | null>(null)
   const [customStyleEditorOpen, setCustomStyleEditorOpen] = useState(false)
   const [customStylePrompt, setCustomStylePrompt] = useState(activeCustomStylePrompt)
   const { present, closing } = usePresence(open, onClose, 180)
@@ -173,7 +177,8 @@ export default function SettingsDrawer({
       const target = event.target as Node
       const clickedInsideTheme = Boolean(themeSelectRef.current?.contains(target))
       const clickedInsideStyle = Boolean(styleSelectRef.current?.contains(target))
-      if (!clickedInsideTheme && !clickedInsideStyle) setOpenSelect(null)
+      const clickedInsideModelSelect = Object.values(modelSelectRefs.current).some((ref) => ref?.contains(target))
+      if (!clickedInsideTheme && !clickedInsideStyle && !clickedInsideModelSelect) setOpenSelect(null)
     }
     document.addEventListener('click', handleDocumentClick)
     return () => document.removeEventListener('click', handleDocumentClick)
@@ -304,9 +309,9 @@ export default function SettingsDrawer({
               <h3 id="memory-settings">上下文与记忆</h3>
               <div className="context-budget-choice" role="radiogroup" aria-label="写作上下文长度">
                 {([
-                  ['standard', '标准', '窗口的 55%'],
-                  ['long', '长', '窗口的 75%'],
-                  ['full', '完整', '窗口的 95%'],
+                  ['standard', '标准', '可用额度的 55%'],
+                  ['long', '长', '可用额度的 75%'],
+                  ['full', '完整', '可用额度的 95%'],
                 ] as const).map(([value, label, hint]) => (
                   <button
                     key={value}
@@ -320,7 +325,7 @@ export default function SettingsDrawer({
                   </button>
                 ))}
               </div>
-              <p className="settings-help">按已识别模型的上下文窗口自动换算（输出与安全预留后按比例使用）。越长越不易忘记旧剧情，但更费 token。</p>
+              <p className="settings-help">按已识别模型窗口扣除输出预留与安全余量得到可用额度，再按所选比例使用（发送前另保留约 8% 序列化安全折减）。越长越不易忘记旧剧情，但更费 token。</p>
               <div className="settings-navigation-stack context-usage-settings-entry">
                 <button type="button" onClick={onOpenContextUsage}>
                   <Gauge size={18} aria-hidden="true" />
@@ -459,23 +464,109 @@ export default function SettingsDrawer({
           {page === 'providers' && (
             <section className="settings-section" aria-labelledby="model-service-settings">
               <h3 id="model-service-settings">模型服务</h3>
+              <ProviderModelSelect
+                slot="text"
+                open={openSelect === 'model-text'}
+                onToggle={() => setOpenSelect((current) => current === 'model-text' ? null : 'model-text')}
+                provider={providerSettings.text}
+                registerRef={(ref) => { modelSelectRefs.current.text = ref }}
+                onSwitch={onSwitchProviderModel}
+              />
               <div className="settings-navigation-stack">
                 <button type="button" onClick={() => onOpenProviderSettings('text')}>
                   <FileText size={18} aria-hidden="true" />
                   <span><strong>文本模型</strong><small>{providerSummary(providerSettings.text)}</small></span>
                   <ChevronRight size={17} aria-hidden="true" />
                 </button>
+              </div>
+              <ProviderModelSelect
+                slot="image"
+                open={openSelect === 'model-image'}
+                onToggle={() => setOpenSelect((current) => current === 'model-image' ? null : 'model-image')}
+                provider={providerSettings.image}
+                registerRef={(ref) => { modelSelectRefs.current.image = ref }}
+                onSwitch={onSwitchProviderModel}
+              />
+              <div className="settings-navigation-stack">
                 <button type="button" onClick={() => onOpenProviderSettings('image')}>
                   <Image size={18} aria-hidden="true" />
                   <span><strong>图片模型</strong><small>{providerSummary(providerSettings.image)}</small></span>
                   <ChevronRight size={17} aria-hidden="true" />
                 </button>
               </div>
-              <p className="settings-help">详细地址、API Key、供应商和模型列表在二级页面管理。</p>
+              <p className="settings-help">在供应商配置中可把常用模型添加到“我的模型”，这里即可直接切换。</p>
             </section>
           )}
         </div>
       </aside>
+    </div>
+  )
+}
+
+/**
+ * 模型服务页的当前模型快速切换下拉。选项来自供应商收藏的 savedModels；
+ * 尚未收藏任何模型时退化为只读展示当前模型，引导用户进配置页添加。
+ */
+function ProviderModelSelect(
+  { slot, open, onToggle, provider, registerRef, onSwitch }: {
+    slot: ProviderSlot
+    open: boolean
+    onToggle: () => void
+    provider: ProviderConfig
+    registerRef: (ref: HTMLDivElement | null) => void
+    onSwitch?: (slot: ProviderSlot, modelId: string) => void
+  },
+) {
+  const label = slot === 'text' ? '文本模型' : '图片模型'
+  const Icon = slot === 'text' ? FileText : Image
+  const options = provider.savedModels?.length
+    ? provider.savedModels
+    : provider.model
+      ? [{ id: provider.model }]
+      : []
+  const activeId = provider.model || options[0]?.id
+
+  return (
+    <div ref={registerRef} className="theme-select provider-model-select">
+      <button
+        className="theme-select-trigger"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <Icon size={16} aria-hidden="true" />
+        <span className="theme-select-copy">
+          <strong>{activeId || '未设置模型'}</strong>
+          <small>{label} · {provider.name.trim() || '未命名供应商'}</small>
+        </span>
+        <ChevronDown size={17} aria-hidden="true" className={open ? 'rotate-180' : undefined} />
+      </button>
+      {open && (
+        <div className="theme-select-menu" role="listbox" aria-label={`切换${label}`}>
+          {options.length === 0 && <p className="provider-model-empty">暂无常用模型，在下方配置里获取并添加。</p>}
+          {options.map((entry) => {
+            const selected = entry.id === activeId
+            return (
+              <button
+                key={entry.id}
+                className="theme-select-option"
+                type="button"
+                role="option"
+                aria-selected={selected}
+                onClick={() => {
+                  if (!onSwitch || entry.id === activeId) return
+                  onSwitch(slot, entry.id)
+                  onToggle()
+                }}
+              >
+                <span><strong>{entry.id}</strong><small>{selected ? '当前使用' : '点击切换'}</small></span>
+                {selected && <Check size={15} aria-hidden="true" />}
+              </button>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

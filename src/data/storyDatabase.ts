@@ -298,16 +298,47 @@ async function upgradeIllustrationModesFromV11(transaction: Transaction) {
 const EVALUATION_MAX_EVENTS = 5000
 const EVALUATION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000
 
-export async function recordProseEvaluationEvent(event: Omit<ProseEvaluationEvent, 'id' | 'occurredAt' | 'schemaVersion' | 'appVersion' | 'databaseVersion'> & Partial<Pick<ProseEvaluationEvent, 'occurredAt'>>) {
-  const occurredAt = event.occurredAt ?? Date.now()
+export type ProseEvaluationEventInput = Omit<ProseEvaluationEvent, 'id' | 'occurredAt' | 'schemaVersion' | 'appVersion' | 'databaseVersion'> & Partial<Pick<ProseEvaluationEvent, 'occurredAt'>>
+
+/** Mirrors the historical per-event comparison exactly: raw values on both sides (stored rows keep the fallback-applied version). */
+function evaluationAnalyzedDedupKey(paragraphId: string | undefined, proseRuleVersion: number | undefined) {
+  return `${paragraphId}|${String(proseRuleVersion)}`
+}
+
+export async function recordProseEvaluationEvent(event: ProseEvaluationEventInput) {
+  await recordProseEvaluationEvents([event])
+}
+
+export async function recordProseEvaluationEvents(events: readonly ProseEvaluationEventInput[]) {
+  if (!events.length) return
+  const occurredAt = Date.now()
+  const rows = events.map((event) => ({
+    ...event,
+    id: createId('evaluation'),
+    occurredAt: event.occurredAt ?? occurredAt,
+    schemaVersion: 1 as const,
+    appVersion: '0.1.0' as const,
+    databaseVersion: 15 as const,
+    proseRuleVersion: event.proseRuleVersion ?? PROSE_RULE_VERSION_FALLBACK,
+  }))
   await storyDatabase.transaction('rw', storyDatabase.evaluationEvents, async () => {
-    if (event.eventType === 'prose_analyzed' && event.paragraphId) {
-      const duplicate = await storyDatabase.evaluationEvents.filter((item) => (
-        item.eventType === 'prose_analyzed' && item.paragraphId === event.paragraphId && item.proseRuleVersion === event.proseRuleVersion
-      )).first()
-      if (duplicate) return
+    // prose_analyzed is idempotent per paragraph + rule version. Resolve every
+    // duplicate for the whole batch with one scan instead of one scan per
+    // event; intra-batch duplicates are absorbed by growing the same set.
+    const analyzedKeys = new Set<string>()
+    for (const event of events) {
+      if (event.eventType === 'prose_analyzed' && event.paragraphId) {
+        analyzedKeys.add(evaluationAnalyzedDedupKey(event.paragraphId, event.proseRuleVersion))
+      }
     }
-    await storyDatabase.evaluationEvents.add({ ...event, id: createId('evaluation'), occurredAt, schemaVersion: 1, appVersion: '0.1.0', databaseVersion: 15, proseRuleVersion: event.proseRuleVersion ?? PROSE_RULE_VERSION_FALLBACK })
+    if (analyzedKeys.size) {
+      await storyDatabase.evaluationEvents.filter((item) => (
+        item.eventType === 'prose_analyzed' && analyzedKeys.has(evaluationAnalyzedDedupKey(item.paragraphId, item.proseRuleVersion))
+      )).each((row) => analyzedKeys.add(evaluationAnalyzedDedupKey(row.paragraphId, row.proseRuleVersion)))
+    }
+    const freshRows = rows.filter((row) => !(row.eventType === 'prose_analyzed' && row.paragraphId && analyzedKeys.has(evaluationAnalyzedDedupKey(row.paragraphId, row.proseRuleVersion))))
+    if (!freshRows.length) return
+    await storyDatabase.evaluationEvents.bulkAdd(freshRows)
     await storyDatabase.evaluationEvents.where('occurredAt').below(occurredAt - EVALUATION_MAX_AGE_MS).delete()
     const count = await storyDatabase.evaluationEvents.count()
     if (count > EVALUATION_MAX_EVENTS) {
@@ -1495,6 +1526,39 @@ export async function upsertPreferenceSignal(input: {
   })
 }
 
+/**
+ * Stores a rewrite-adoption preference without a feedback record. signalKey is
+ * a stable per-rule key: re-adoptions overwrite the same row and refresh its
+ * updatedAt, so recently repeated issues surface first in context listing.
+ */
+export async function upsertDerivedPreferenceSignal(input: {
+  projectId: string
+  signalKey: string
+  dimension: PreferenceDimension
+  instruction: string
+}) {
+  const instruction = input.instruction.trim().replace(/\s+/g, ' ').slice(0, 180)
+  if (!instruction) throw new Error('偏好说明不能为空')
+  if (!/^(?:后续|继续|避免|少用|多用|保持|让)/.test(instruction)) throw new Error('偏好说明需要描述后续写作方式')
+  const projectId = requiredFeedbackString(input.projectId, '作品 ID')
+  if (!/^[a-z0-9-]{1,80}$/.test(input.signalKey)) throw new Error('偏好信号键无效')
+  const verdict: Feedback['verdict'] = 'down'
+  const now = Date.now()
+  return storyDatabase.transaction('rw', storyDatabase.preferenceSignals, async () => {
+    const id = `preference-derived-${input.signalKey}`
+    const fingerprint = hashTextImpl(`${verdict}:${input.dimension}:${instruction}`)
+    const existing = await storyDatabase.preferenceSignals.get(id)
+    const signal: PreferenceSignal = {
+      id, projectId, feedbackId: undefined,
+      verdict, dimension: input.dimension, instruction,
+      source: 'user', fingerprint,
+      createdAt: existing?.createdAt ?? now, updatedAt: now,
+    }
+    await storyDatabase.preferenceSignals.put(signal)
+    return signal
+  })
+}
+
 function hasValidParagraphFingerprint(paragraph: StoredParagraph) {
   return typeof paragraph.text === 'string'
     && paragraph.text.trim().length > 0
@@ -1615,7 +1679,7 @@ export async function createProject(title: string) {
     id: projectId,
     title: title.trim(),
     themeId: 'neutral',
-    illustrationMode: 'auto',
+    illustrationMode: 'none',
     writingInstructions: '',
     createdAt: now,
     updatedAt: now,

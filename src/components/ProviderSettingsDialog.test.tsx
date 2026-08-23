@@ -14,9 +14,12 @@ const secretStoreMocks = vi.hoisted(() => ({
   remove: vi.fn().mockResolvedValue(undefined),
 }))
 
+const listOpenAiModelsMock = vi.hoisted(() => vi.fn())
+
 const capacitorMocks = vi.hoisted(() => ({ native: true }))
 
 vi.mock('../providers/secretStore', () => ({ secretStore: secretStoreMocks }))
+vi.mock('../providers/openAiCompatible', () => ({ listOpenAiModels: listOpenAiModelsMock }))
 vi.mock('@capacitor/core', () => ({
   Capacitor: { isNativePlatform: () => capacitorMocks.native },
   CapacitorHttp: { request: vi.fn() },
@@ -116,7 +119,7 @@ describe('ProviderSettingsDialog layering', () => {
     fireEvent.click(screen.getByRole('button', { name: /模型服务/ }))
     // SettingsDrawer 页面切换带 160ms 退出动画，等页面重挂载完成后再进入
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '返回设置' })))
-    fireEvent.click(screen.getByRole('button', { name: /文本模型/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^文本模型/ }))
     await screen.findByRole('dialog', { name: '模型接口' })
 
     const settingsDrawer = container.querySelector('.settings-drawer')
@@ -560,5 +563,129 @@ describe('ProviderSettingsDialog compatibility presets', () => {
 
     await waitFor(() => expect(onSave).toHaveBeenCalled())
     expect(onSave.mock.calls[0][0].text.capabilities).toEqual({})
+  })
+})
+
+describe('ProviderSettingsDialog saved models', () => {
+  const savedSettings: ProviderSettings = {
+    ...settings,
+    text: {
+      ...settings.text,
+      baseUrl: 'https://api.test/v1',
+      model: 'model-a',
+      contextLength: 8000,
+      manualContextLength: 111,
+      savedModels: [
+        { id: 'model-a', contextLength: 8000, manualContextLength: 111 },
+        { id: 'model-b', contextLength: 128000, manualContextLength: 222, reasoningEffort: 'high' },
+      ],
+    },
+  }
+
+  function renderSavedDialog() {
+    const fullSettings: ProviderSettings = { ...savedSettings, textProviders: [savedSettings.text] }
+    const onSave = vi.fn()
+    render(<ProviderSettingsDialog open settings={fullSettings} onClose={vi.fn()} onSave={onSave} />)
+    return onSave
+  }
+
+  function modelIdValue() {
+    return (screen.getByLabelText(/模型 ID/) as HTMLInputElement).value
+  }
+
+  function manualWindowValue() {
+    return (screen.getByLabelText(/^上下文窗口/) as HTMLInputElement).value
+  }
+
+  it('switches the active model from my models and restores its per-model memory', async () => {
+    const user = userEvent.setup()
+    renderSavedDialog()
+
+    await screen.findByRole('region', { name: '我的模型' })
+    expect(modelIdValue()).toBe('model-a')
+    expect(manualWindowValue()).toBe('111')
+    expect(screen.getByRole('radio', { name: '自动' }).getAttribute('aria-checked')).toBe('true')
+
+    await user.click(screen.getByRole('button', { name: 'model-b' }))
+    expect(modelIdValue()).toBe('model-b')
+    expect(manualWindowValue()).toBe('222')
+    // 思考等级跟随模型记忆恢复
+    expect(screen.getByRole('radio', { name: '高' }).getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('removes the active model and clears the selection back to the empty state', async () => {
+    const user = userEvent.setup()
+    renderSavedDialog()
+
+    await screen.findByRole('region', { name: '我的模型' })
+    await user.click(screen.getByRole('button', { name: '移除 model-a' }))
+
+    expect(screen.getAllByRole('button', { name: /^model-/ })).toHaveLength(1)
+    expect(modelIdValue()).toBe('')
+    expect(manualWindowValue()).toBe('')
+  })
+
+  it('collects multiple fetched models via add buttons and persists them on save', async () => {
+    const user = userEvent.setup()
+    listOpenAiModelsMock.mockResolvedValue({
+      baseUrl: 'https://api.test/v1',
+      models: [
+        { id: 'gpt-4o', ownedBy: 'openai' },
+        { id: 'deepseek-chat' },
+        { id: 'qwen-max' },
+      ],
+    })
+    const fetchedSettings: ProviderSettings = {
+      ...settings,
+      text: { ...settings.text, baseUrl: 'https://api.test/v1' },
+      textProviders: [{ ...settings.text, baseUrl: 'https://api.test/v1' }],
+    }
+    const onSave = vi.fn()
+    render(<ProviderSettingsDialog open settings={fetchedSettings} onClose={vi.fn()} onSave={onSave} />)
+
+    await user.type(screen.getByLabelText('API Key'), 'sk-test')
+    await user.click(screen.getByRole('button', { name: /获取模型列表/ }))
+    await screen.findByText(/已获取 3 个模型/)
+    const list = screen.getByRole('listbox', { name: '模型列表' })
+    await user.click(within(list).getByRole('button', { name: '添加 gpt-4o 到我的模型' }))
+    await user.click(within(list).getByRole('button', { name: '添加 deepseek-chat 到我的模型' }))
+
+    const mine = screen.getByRole('region', { name: '我的模型' })
+    expect(mine.textContent).toContain('2 个')
+
+    // 点击行主体（role=option）直接设为当前并自动收藏
+    await user.click(within(list).getByRole('option', { name: 'qwen-max' }))
+    expect(modelIdValue()).toBe('qwen-max')
+    expect(screen.getByRole('region', { name: '我的模型' }).textContent).toContain('3 个')
+
+    await user.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+    expect(onSave.mock.calls[0][0].text.savedModels.map((entry: { id: string }) => entry.id)).toEqual(['gpt-4o', 'deepseek-chat', 'qwen-max'])
+  })
+
+  it('editing the manual window of the active model syncs into its saved entry', async () => {
+    const user = userEvent.setup()
+    const onSave = renderSavedDialog()
+
+    await screen.findByRole('region', { name: '我的模型' })
+    await user.type(screen.getByLabelText(/^上下文窗口/), '5')
+
+    await user.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+    expect(onSave.mock.calls[0][0].text.savedModels[0]).toMatchObject({ id: 'model-a', manualContextLength: 1115 })
+  })
+
+  it('changing the reasoning effort of the active model syncs into its saved entry', async () => {
+    const user = userEvent.setup()
+    const onSave = renderSavedDialog()
+
+    await screen.findByRole('region', { name: '我的模型' })
+    await user.click(screen.getByRole('button', { name: 'model-b' }))
+    await user.click(screen.getByRole('radio', { name: '中' }))
+
+    await user.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+    expect(onSave.mock.calls[0][0].text.savedModels[1]).toMatchObject({ id: 'model-b', reasoningEffort: 'medium' })
+    expect(onSave.mock.calls[0][0].text.savedModels[0].reasoningEffort).toBeUndefined()
   })
 })

@@ -32,7 +32,9 @@ import {
   deleteProject,
   getStyleCorpusSummary,
   upsertPreferenceSignal,
+  upsertDerivedPreferenceSignal,
   recordProseEvaluationEvent,
+  recordProseEvaluationEvents,
   listChapterSummaryVersions,
   renameProject,
   restoreChapterSummaryVersion,
@@ -42,17 +44,19 @@ import {
   updateProjectTheme,
   updateWritingInstructions,
   updateWritingStructure,
+  type ProseEvaluationEventInput,
 } from './data/storyDatabase'
 import { createEvaluationEvent, evaluationIssueFields, proseDurationBucket, proseLengthBucket, proseLengthChangeBucket, rewriteRequestedEvaluation, writingTurnCompletedEvaluation } from './domain/proseEvaluation'
-import { PROSE_STYLE_RULE_VERSION } from './domain/proseStyle'
+import { PROSE_STYLE_RULE_VERSION, rewritePreferenceForRule } from './domain/proseStyle'
 import { resolveProjectIllustrationStyle } from './domain/illustrationStyles'
 import { resolveIllustrationMode, type AppearanceMode, type ContextBudget, type ConversationMessage, type Feedback, type FeedbackVerdict, type IllustrationMode, type IllustrationStylePresetId, type RewriteStrength, type StoredParagraph, type ThemePresetId } from './domain/models'
 import { browserTransport } from './providers/browserTransport'
-import { loadProviderSettings, saveProviderSettings } from './providers/config'
+import { loadProviderSettings, saveProviderSettings, savedModelPatch, syncActiveModelIntoSaved } from './providers/config'
 import { loadGlobalWritingInstructions, saveGlobalWritingInstructions } from './providers/config'
 import { logImagePipeline } from './providers/imagePipelineLog'
 import { secretStore } from './providers/secretStore'
 import { useAppBootstrap } from './hooks/useAppBootstrap'
+import { useStableCallback } from './hooks/useStableCallback'
 import { useTimelineNavigation } from './hooks/useTimelineNavigation'
 import { useWritingTurnController } from './hooks/useWritingTurnController'
 import { useImageAssetWorkflow } from './hooks/useImageAssetWorkflow'
@@ -61,6 +65,11 @@ import type { ProviderSettings, ProviderSlot, ReasoningEffort } from './provider
 import { analyzeFeedbackPreference, markStyleCorpusFragmentsUsed, retrieveStyleExamples, rewriteProseParagraph } from './providers/writing'
 
 const APPEARANCE_KEY = 'illustrated-story-chat.appearance.v1'
+
+/** Queued timeline analytics flush at most this often while new events keep arriving. */
+const PROSE_EVALUATION_FLUSH_DEBOUNCE_MS = 2000
+/** A queue this long flushes immediately instead of waiting out the debounce. */
+const PROSE_EVALUATION_FLUSH_THRESHOLD = 64
 
 function loadAppearanceMode(): AppearanceMode {
   return localStorage.getItem(APPEARANCE_KEY) === 'light' ? 'light' : 'dark'
@@ -97,6 +106,8 @@ export default function App() {
   const showToast = useCallback((text: string, kind: 'success' | 'error' = 'success') => {
     setToast({ text, kind })
   }, [])
+  const proseEvaluationQueueRef = useRef<ProseEvaluationEventInput[]>([])
+  const proseEvaluationFlushTimerRef = useRef<number | undefined>(undefined)
 
   const {
     bootError,
@@ -238,6 +249,11 @@ export default function App() {
       paragraphIndex: paragraph.index, originalFingerprint: paragraph.fingerprint, rewrittenText,
     })
     void recordProseEvaluationEvent(createEvaluationEvent('rewrite_applied', { projectId: message.projectId, messageId: message.id, paragraphId: paragraph.id, proseRuleVersion: PROSE_STYLE_RULE_VERSION, paragraphLengthBucket: proseLengthBucket(paragraph.text), suggestionLengthBucket: proseLengthBucket(rewrittenText), lengthChangeBucket: proseLengthChangeBucket(paragraph.text, rewrittenText), beforeRuleIds: (paragraph.styleIssues ?? []).map((issue) => issue.ruleId), factProtection: 'not_checked' })).catch(() => undefined)
+    for (const issue of paragraph.styleIssues ?? []) {
+      const preference = rewritePreferenceForRule(issue.ruleId)
+      if (!preference) continue
+      void upsertDerivedPreferenceSignal({ projectId: message.projectId, signalKey: `rewrite-${issue.ruleId}`, dimension: preference.dimension, instruction: preference.instruction }).catch(() => undefined)
+    }
     await refreshWorkspace(message.projectId)
     showToast('已采用建议稿')
     } catch (error) { void recordProseEvaluationEvent(createEvaluationEvent('rewrite_apply_failed', { projectId: message.projectId, messageId: message.id, paragraphId: paragraph.id, proseRuleVersion: PROSE_STYLE_RULE_VERSION, failureKind: 'storage', factProtection: 'not_checked' })).catch(() => undefined); throw error }
@@ -365,7 +381,8 @@ export default function App() {
   }
 
   function handleReasoningEffortChange(reasoningEffort: ReasoningEffort) {
-    const nextTextProvider = { ...providerSettings.text, reasoningEffort }
+    // 思考等级跟随当前模型记忆：同步回写 savedModels 中匹配条目
+    const nextTextProvider = syncActiveModelIntoSaved({ ...providerSettings.text, reasoningEffort })
     const hasActiveProvider = providerSettings.textProviders.some((provider) => provider.id === nextTextProvider.id)
     const nextSettings: ProviderSettings = {
       ...providerSettings,
@@ -373,6 +390,24 @@ export default function App() {
       textProviders: hasActiveProvider
         ? providerSettings.textProviders.map((provider) => provider.id === nextTextProvider.id ? nextTextProvider : provider)
         : [nextTextProvider, ...providerSettings.textProviders],
+    }
+    saveProviderSettings(nextSettings)
+    setProviderSettings(nextSettings)
+  }
+
+  function handleSwitchProviderModel(slot: ProviderSlot, modelId: string) {
+    const provider = providerSettings[slot]
+    const entry = provider.savedModels?.find((model) => model.id === modelId)
+    if (!entry || provider.model === modelId) return
+    const nextProvider = { ...provider, ...savedModelPatch(entry) }
+    const key = slot === 'text' ? 'textProviders' : 'imageProviders'
+    const hasActiveProvider = providerSettings[key].some((item) => item.id === nextProvider.id)
+    const nextSettings: ProviderSettings = {
+      ...providerSettings,
+      [slot]: nextProvider,
+      [key]: hasActiveProvider
+        ? providerSettings[key].map((item) => item.id === nextProvider.id ? nextProvider : item)
+        : [nextProvider, ...providerSettings[key]],
     }
     saveProviderSettings(nextSettings)
     setProviderSettings(nextSettings)
@@ -408,6 +443,72 @@ export default function App() {
     } : current)
     await updateContextBudget(workspace.project.id, contextBudget)
   }
+
+  // Prose evaluation analytics are emitted per mounted prose paragraph (every
+  // historical entry reports its rule findings). Writing each event as its own
+  // transaction turned opening a long work into hundreds of IndexedDB writes,
+  // so timeline-sourced events queue here and land in one bulk write per
+  // debounce window. User-action events elsewhere keep direct writes.
+  const flushQueuedProseEvaluationEvents = useCallback(() => {
+    if (proseEvaluationFlushTimerRef.current !== undefined) {
+      window.clearTimeout(proseEvaluationFlushTimerRef.current)
+      proseEvaluationFlushTimerRef.current = undefined
+    }
+    const queued = proseEvaluationQueueRef.current
+    if (!queued.length) return
+    proseEvaluationQueueRef.current = []
+    void recordProseEvaluationEvents(queued).catch(() => undefined)
+  }, [])
+
+  const queueProseEvaluationEvent = useCallback((event: ProseEvaluationEventInput) => {
+    proseEvaluationQueueRef.current.push(event)
+    if (proseEvaluationQueueRef.current.length >= PROSE_EVALUATION_FLUSH_THRESHOLD) {
+      flushQueuedProseEvaluationEvents()
+      return
+    }
+    if (proseEvaluationFlushTimerRef.current !== undefined) return
+    proseEvaluationFlushTimerRef.current = window.setTimeout(() => {
+      proseEvaluationFlushTimerRef.current = undefined
+      flushQueuedProseEvaluationEvents()
+    }, PROSE_EVALUATION_FLUSH_DEBOUNCE_MS)
+  }, [flushQueuedProseEvaluationEvents])
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushQueuedProseEvaluationEvents()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('pagehide', flushQueuedProseEvaluationEvents)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('pagehide', flushQueuedProseEvaluationEvents)
+      flushQueuedProseEvaluationEvents()
+    }
+  }, [flushQueuedProseEvaluationEvents])
+
+  // Timeline entries are memoized; these stable wrappers keep handler props
+  // referential-stable while each call still reads the latest render's state.
+  const stableRetryIllustration = useStableCallback(retryIllustration)
+  const stableRetryWriting = useStableCallback(retryWriting)
+  const stableEditLatestUserMessage = useStableCallback(editLatestUserMessage)
+  const stableRegenerateLatestProse = useStableCallback(regenerateLatestProse)
+  const stableKeepOriginalProse = useStableCallback(keepOriginalProse)
+  const stableAdoptCandidateProse = useStableCallback(adoptCandidateProse)
+  const stableAnalyzeFeedbackPreference = useStableCallback(handleAnalyzeFeedbackPreference)
+  const stableOpenCharacterAssets = useStableCallback(openCharacterAssets)
+  const stableRewriteParagraph = useStableCallback(handleRewriteParagraph)
+  const stableApplyRewrite = useStableCallback(handleApplyRewrite)
+  const openImageSettingsFromTimeline = useStableCallback(() => openProviderSettings('image'))
+  const openLightboxImage = useStableCallback((source: string, title: string, alt: string, localUri?: string) => setLightboxImage({ source, title, alt, localUri }))
+  const handleTimelineProseEvaluation = useStableCallback(({ type, message, paragraph }: { type: 'analyzed' | 'rewrite_opened' | 'rewrite_kept_original'; message: ConversationMessage; paragraph: StoredParagraph }) => {
+    const issues = paragraph.styleIssues ?? []
+    const event = type === 'analyzed'
+      ? createEvaluationEvent('prose_analyzed', { projectId: message.projectId, messageId: message.id, paragraphId: paragraph.id, proseRuleVersion: paragraph.styleRuleVersion ?? PROSE_STYLE_RULE_VERSION, paragraphLengthBucket: proseLengthBucket(paragraph.text), ...evaluationIssueFields(issues) })
+      : type === 'rewrite_opened'
+        ? createEvaluationEvent('rewrite_opened', { projectId: message.projectId, messageId: message.id, paragraphId: paragraph.id, proseRuleVersion: PROSE_STYLE_RULE_VERSION, paragraphLengthBucket: proseLengthBucket(paragraph.text), ...evaluationIssueFields(issues) })
+        : createEvaluationEvent('rewrite_kept_original', { projectId: message.projectId, messageId: message.id, paragraphId: paragraph.id, proseRuleVersion: PROSE_STYLE_RULE_VERSION, factProtection: 'not_checked' as const })
+    queueProseEvaluationEvent(event)
+  })
 
   if (bootError) {
     return (
@@ -536,34 +637,26 @@ export default function App() {
                     message={message}
                     illustration={illustration}
                     illustrationGenerationStage={illustration ? illustrationGenerationStages[illustration.id] : undefined}
-                    onRetryIllustration={retryIllustration}
-                    onRetryWriting={retryWriting}
+                    onRetryIllustration={stableRetryIllustration}
+                    onRetryWriting={stableRetryWriting}
                     canEditUserMessage={message.id === latestEditableUserMessageId && generationPhase === 'idle'}
-                    onEditUserMessage={editLatestUserMessage}
+                    onEditUserMessage={stableEditLatestUserMessage}
                     canRegenerate={message.id === latestRegenerableMessageId}
                     writingCandidate={writingCandidate?.proseMessageId === message.id ? writingCandidate : undefined}
                     regenerationBusy={regeneratingProseMessageId === message.id}
                     writingBusy={generationPhase !== 'idle'}
-                    onRegenerateProse={regenerateLatestProse}
-                    onKeepOriginalProse={keepOriginalProse}
-                    onAdoptCandidateProse={adoptCandidateProse}
-                    onAnalyzeFeedbackPreference={handleAnalyzeFeedbackPreference}
+                    onRegenerateProse={stableRegenerateLatestProse}
+                    onKeepOriginalProse={stableKeepOriginalProse}
+                    onAdoptCandidateProse={stableAdoptCandidateProse}
+                    onAnalyzeFeedbackPreference={stableAnalyzeFeedbackPreference}
                     imageProviderReady={imageProviderReady}
-                    onOpenImageSettings={() => openProviderSettings('image')}
+                    onOpenImageSettings={openImageSettingsFromTimeline}
                     characters={workspace.characters}
-                    onOpenCharacterAssets={openCharacterAssets}
-                    onOpenIllustration={(source, title, alt, localUri) => setLightboxImage({ source, title, alt, localUri })}
-                    onRewriteParagraph={handleRewriteParagraph}
-                    onApplyRewrite={handleApplyRewrite}
-                    onProseEvaluation={({ type, message, paragraph }) => {
-                      const issues = paragraph.styleIssues ?? []
-                      const event = type === 'analyzed'
-                        ? createEvaluationEvent('prose_analyzed', { projectId: message.projectId, messageId: message.id, paragraphId: paragraph.id, proseRuleVersion: paragraph.styleRuleVersion ?? PROSE_STYLE_RULE_VERSION, paragraphLengthBucket: proseLengthBucket(paragraph.text), ...evaluationIssueFields(issues) })
-                        : type === 'rewrite_opened'
-                          ? createEvaluationEvent('rewrite_opened', { projectId: message.projectId, messageId: message.id, paragraphId: paragraph.id, proseRuleVersion: PROSE_STYLE_RULE_VERSION, paragraphLengthBucket: proseLengthBucket(paragraph.text), ...evaluationIssueFields(issues) })
-                          : createEvaluationEvent('rewrite_kept_original', { projectId: message.projectId, messageId: message.id, paragraphId: paragraph.id, proseRuleVersion: PROSE_STYLE_RULE_VERSION, factProtection: 'not_checked' })
-                      void recordProseEvaluationEvent(event).catch(() => undefined)
-                    }}
+                    onOpenCharacterAssets={stableOpenCharacterAssets}
+                    onOpenIllustration={openLightboxImage}
+                    onRewriteParagraph={stableRewriteParagraph}
+                    onApplyRewrite={stableApplyRewrite}
+                    onProseEvaluation={handleTimelineProseEvaluation}
                   />
                 </div>
               )
@@ -652,6 +745,7 @@ export default function App() {
         }}
         providerSettings={providerSettings}
         onOpenProviderSettings={openProviderSettings}
+        onSwitchProviderModel={handleSwitchProviderModel}
         appearanceMode={appearanceMode}
         onAppearanceChange={handleAppearanceChange}
       />

@@ -1,5 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { detectProseStyleIssues, PROSE_STYLE_RULES } from './proseStyle'
+import { detectProseStyleIssues, PROSE_STYLE_RULES, rewritePreferenceForRule } from './proseStyle'
+
+describe('rewritePreferenceForRule', () => {
+  it('covers every local rule with a valid generation-side instruction', () => {
+    const dimensions = new Set(['plot', 'character', 'dialogue', 'pace', 'description', 'rhetoric', 'emotion', 'ending'])
+    for (const rule of PROSE_STYLE_RULES) {
+      const preference = rewritePreferenceForRule(rule.id)
+      expect(preference, `missing rewrite preference for ${rule.id}`).toBeDefined()
+      expect(dimensions.has(preference!.dimension)).toBe(true)
+      expect(/^(?:后续|继续|避免|少用|多用|保持|让)/.test(preference!.instruction)).toBe(true)
+      expect(preference!.instruction.length).toBeLessThanOrEqual(180)
+    }
+    expect(rewritePreferenceForRule('unknown-rule')).toBeUndefined()
+  })
+
+  it('bans template pairings without banning the rhetorical device itself', () => {
+    expect(rewritePreferenceForRule('generic-animal-simile')?.instruction).toContain('新颖喻体')
+    for (const preference of ['generic-animal-simile', 'template-calm-as-everyday'].map((id) => rewritePreferenceForRule(id)!)) {
+      expect(preference.instruction).not.toMatch(/不得使用比喻|禁止比喻|不要用比喻/)
+    }
+  })
+})
 
 describe('detectProseStyleIssues', () => {
   it('uses stable rule ids for representative novel style patterns', () => {

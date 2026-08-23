@@ -19,7 +19,16 @@ const MIN_CONTEXT_TOKENS = 4_000
 export const CONTEXT_SERIALIZATION_OVERHEAD_CHARS = 512
 /** Legacy 512-character serialization guard expressed once as a fixed token reserve. */
 const CONTEXT_SERIALIZATION_GUARD_TOKENS = 427
-export const CONTEXT_NARROWING_FACTOR = 0.85
+/**
+ * Final safety discount on the context-budget ratios, kept separate from the
+ * ratios so the settings UI can quote them verbatim. It exists solely to
+ * absorb the residual gap between the local estimator and the provider's real
+ * tokenizer (o200k vs provider BPE on mixed Chinese/JSON payloads). 0.92 keeps
+ * ~8% headroom; the historical 0.85 double-discounted the ratios and silently
+ * gave large-window models ~17 percentage points less context than the
+ * settings promised.
+ */
+export const CONTEXT_NARROWING_FACTOR = 0.92
 
 /**
  * Context pressure is measured against the usable content budget, before any
