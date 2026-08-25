@@ -199,6 +199,21 @@ export interface ConversationMessage {
 export type ParagraphSourceType = 'message' | 'chapter'
 
 /**
+ * A reader-flagged "this still reads like AI" paragraph that no detector
+ * caught. Stored locally with full prose text on purpose: these rows are the
+ * seed labels for future detector training and must never enter the anonymous
+ * evaluation telemetry pipeline.
+ */
+export interface MissedFlavorReport {
+  id: string
+  projectId: string
+  messageId?: string
+  paragraphId: string
+  text: string
+  createdAt: number
+}
+
+/**
  * A stable storage record for a paragraph. Message rendering intentionally
  * continues to use ConversationMessage.paragraphs for backward compatibility.
  */
@@ -247,11 +262,11 @@ export interface Feedback {
 
 export type PreferenceDimension = 'plot' | 'character' | 'dialogue' | 'pace' | 'description' | 'rhetoric' | 'emotion' | 'ending'
 
-/** A text-free, reusable preference. Source feedback remains an UI record. */
+/** A text-free, reusable preference. Source feedback remains an UI record; signals derived from rewrite adoptions have no feedback record. */
 export interface PreferenceSignal {
   id: string
   projectId: string
-  feedbackId: string
+  feedbackId?: string
   verdict: FeedbackVerdict
   dimension: PreferenceDimension
   instruction: string

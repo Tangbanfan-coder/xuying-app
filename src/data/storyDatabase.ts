@@ -18,6 +18,7 @@ import type {
   IllustrationStylePresetId,
   IllustrationAsset,
   IllustrationMode,
+  MissedFlavorReport,
   ProjectStyle,
   ProseEvaluationEvent,
   ProjectWorkspace,
@@ -43,7 +44,7 @@ import { materializeWritingSceneNotes, reconcileForeshadowing } from '../domain/
 import { createParagraphFingerprint, hasWritingContentOverlap, hashText as hashTextImpl, normalizeText as normalizeParagraphText } from '../domain/paragraphs'
 import { stripChapterOrderPrefixes } from '../domain/chapterTitle'
 import { loadGlobalWritingInstructions } from '../providers/config'
-import { detectProseStyleIssues, mergeProseStyleIssues, PROSE_STYLE_RULE_VERSION } from '../domain/proseStyle'
+import { detectProseStyleIssues, MAX_PROSE_ANALYSIS_PARAGRAPHS, mergeProseStyleIssues, PROSE_STYLE_RULE_VERSION } from '../domain/proseStyle'
 
 export { hashText, normalizeText } from '../domain/paragraphs'
 
@@ -66,6 +67,7 @@ export class StoryDatabase extends Dexie {
   styleCorpusFragments!: Table<StyleCorpusFragment, string>
   styleCorpusBindings!: Table<StyleCorpusBinding, string>
   evaluationEvents!: Table<ProseEvaluationEvent, string>
+  missedFlavorReports!: Table<MissedFlavorReport, string>
 
   constructor(databaseName = STORY_DATABASE_NAME) {
     super(databaseName)
@@ -259,6 +261,13 @@ export class StoryDatabase extends Dexie {
       .upgrade(async (transaction) => {
         await sanitizeChapterTitlesFromV14(transaction)
       })
+    // Reader-flagged missed "AI flavor" paragraphs keep their full prose text
+    // locally as future training labels; the table is deliberately absent from
+    // the anonymous evaluation telemetry export.
+    this.version(16).stores({
+      projects: 'id, updatedAt, lastOpenedAt', messages: 'id, projectId, [projectId+order], createdAt, backgroundTaskId, turnId',
+      chapters: 'id, projectId, [projectId+order], updatedAt', characters: 'id, projectId, [projectId+createdAt], status', illustrations: 'id, projectId, [projectId+createdAt], status, turnId', styles: 'id, &projectId, updatedAt', scenes: 'id, projectId, [projectId+order], createdAt, turnId', paragraphs: 'id, projectId, sourceType, [projectId+sourceType], [projectId+chapterId], [projectId+messageId], fingerprint, createdAt', summaryVersions: 'id, projectId, chapterId, [projectId+chapterId], &[projectId+chapterId+version], createdAt', feedback: 'id, projectId, messageId, [projectId+messageId], &targetKey, [projectId+updatedAt], updatedAt', preferenceSignals: 'id, projectId, feedbackId, fingerprint, [projectId+updatedAt], updatedAt', writingCandidates: 'id, projectId, turnId, proseMessageId, [projectId+turnId], [projectId+updatedAt], updatedAt', styleCorpusSources: 'id, &fingerprint, createdAt, updatedAt', styleCorpusFragments: 'id, sourceId, fingerprint, confirmed, usageCount, updatedAt', styleCorpusBindings: 'id, fragmentId, scope, projectId, state, [scope+state], [projectId+state], updatedAt', evaluationEvents: 'id, eventType, occurredAt, projectId, [projectId+occurredAt]', missedFlavorReports: 'id, paragraphId, projectId, createdAt',
+    })
   }
 }
 
@@ -298,16 +307,47 @@ async function upgradeIllustrationModesFromV11(transaction: Transaction) {
 const EVALUATION_MAX_EVENTS = 5000
 const EVALUATION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000
 
-export async function recordProseEvaluationEvent(event: Omit<ProseEvaluationEvent, 'id' | 'occurredAt' | 'schemaVersion' | 'appVersion' | 'databaseVersion'> & Partial<Pick<ProseEvaluationEvent, 'occurredAt'>>) {
-  const occurredAt = event.occurredAt ?? Date.now()
+export type ProseEvaluationEventInput = Omit<ProseEvaluationEvent, 'id' | 'occurredAt' | 'schemaVersion' | 'appVersion' | 'databaseVersion'> & Partial<Pick<ProseEvaluationEvent, 'occurredAt'>>
+
+/** Mirrors the historical per-event comparison exactly: raw values on both sides (stored rows keep the fallback-applied version). */
+function evaluationAnalyzedDedupKey(paragraphId: string | undefined, proseRuleVersion: number | undefined) {
+  return `${paragraphId}|${String(proseRuleVersion)}`
+}
+
+export async function recordProseEvaluationEvent(event: ProseEvaluationEventInput) {
+  await recordProseEvaluationEvents([event])
+}
+
+export async function recordProseEvaluationEvents(events: readonly ProseEvaluationEventInput[]) {
+  if (!events.length) return
+  const occurredAt = Date.now()
+  const rows = events.map((event) => ({
+    ...event,
+    id: createId('evaluation'),
+    occurredAt: event.occurredAt ?? occurredAt,
+    schemaVersion: 1 as const,
+    appVersion: '0.1.0' as const,
+    databaseVersion: 15 as const,
+    proseRuleVersion: event.proseRuleVersion ?? PROSE_RULE_VERSION_FALLBACK,
+  }))
   await storyDatabase.transaction('rw', storyDatabase.evaluationEvents, async () => {
-    if (event.eventType === 'prose_analyzed' && event.paragraphId) {
-      const duplicate = await storyDatabase.evaluationEvents.filter((item) => (
-        item.eventType === 'prose_analyzed' && item.paragraphId === event.paragraphId && item.proseRuleVersion === event.proseRuleVersion
-      )).first()
-      if (duplicate) return
+    // prose_analyzed is idempotent per paragraph + rule version. Resolve every
+    // duplicate for the whole batch with one scan instead of one scan per
+    // event; intra-batch duplicates are absorbed by growing the same set.
+    const analyzedKeys = new Set<string>()
+    for (const event of events) {
+      if (event.eventType === 'prose_analyzed' && event.paragraphId) {
+        analyzedKeys.add(evaluationAnalyzedDedupKey(event.paragraphId, event.proseRuleVersion))
+      }
     }
-    await storyDatabase.evaluationEvents.add({ ...event, id: createId('evaluation'), occurredAt, schemaVersion: 1, appVersion: '0.1.0', databaseVersion: 15, proseRuleVersion: event.proseRuleVersion ?? PROSE_RULE_VERSION_FALLBACK })
+    if (analyzedKeys.size) {
+      await storyDatabase.evaluationEvents.filter((item) => (
+        item.eventType === 'prose_analyzed' && analyzedKeys.has(evaluationAnalyzedDedupKey(item.paragraphId, item.proseRuleVersion))
+      )).each((row) => analyzedKeys.add(evaluationAnalyzedDedupKey(row.paragraphId, row.proseRuleVersion)))
+    }
+    const freshRows = rows.filter((row) => !(row.eventType === 'prose_analyzed' && row.paragraphId && analyzedKeys.has(evaluationAnalyzedDedupKey(row.paragraphId, row.proseRuleVersion))))
+    if (!freshRows.length) return
+    await storyDatabase.evaluationEvents.bulkAdd(freshRows)
     await storyDatabase.evaluationEvents.where('occurredAt').below(occurredAt - EVALUATION_MAX_AGE_MS).delete()
     const count = await storyDatabase.evaluationEvents.count()
     if (count > EVALUATION_MAX_EVENTS) {
@@ -740,7 +780,7 @@ export async function saveModelProseAnalysis(input: {
   if (!Array.isArray(input.paragraphs) || !Array.isArray(input.issuesByParagraph) || input.paragraphs.length !== input.issuesByParagraph.length) {
     throw new Error('文风分析段落数量已过期')
   }
-  if (input.paragraphs.length > 24) throw new Error('一次文风分析最多支持 24 段')
+  if (input.paragraphs.length > MAX_PROSE_ANALYSIS_PARAGRAPHS) throw new Error(`一次正文风检最多支持 ${MAX_PROSE_ANALYSIS_PARAGRAPHS} 段`)
   input.paragraphs.forEach((text) => {
     if (typeof text !== 'string' || !text.trim() || text.length > 50_000) throw new Error('文风分析段落内容无效')
   })
@@ -807,6 +847,43 @@ export async function saveModelProseAnalysis(input: {
     if (updates.length) await storyDatabase.paragraphs.bulkPut(updates)
     return updates
   })
+}
+
+/**
+ * Persists a reader-flagged "still reads like AI" paragraph with its full
+ * text. One row per paragraph id: a repeat flag is a no-op so the label set
+ * never duplicates. These rows intentionally stay outside the anonymous
+ * telemetry pipeline because they contain prose.
+ */
+export async function saveMissedFlavorReport(input: { projectId: string; messageId?: string; paragraphId: string; text: string }) {
+  if (!input || typeof input.projectId !== 'string' || !input.projectId.trim()) throw new Error('漏检上报缺少作品标识')
+  if (typeof input.paragraphId !== 'string' || !input.paragraphId.trim()) throw new Error('漏检上报缺少段落标识')
+  if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 50_000) throw new Error('漏检上报段落内容无效')
+  const existing = await storyDatabase.missedFlavorReports.where('paragraphId').equals(input.paragraphId).first()
+  if (existing) return false
+  const report: MissedFlavorReport = {
+    id: crypto.randomUUID(),
+    projectId: input.projectId,
+    ...(input.messageId ? { messageId: input.messageId } : {}),
+    paragraphId: input.paragraphId,
+    text: input.text,
+    createdAt: Date.now(),
+  }
+  await storyDatabase.missedFlavorReports.add(report)
+  return true
+}
+
+export function listMissedFlavorReports() {
+  return storyDatabase.missedFlavorReports.orderBy('createdAt').reverse().toArray()
+}
+
+export async function deleteMissedFlavorReport(paragraphId: string) {
+  if (typeof paragraphId !== 'string' || !paragraphId.trim()) throw new Error('漏检上报缺少段落标识')
+  await storyDatabase.missedFlavorReports.where('paragraphId').equals(paragraphId).delete()
+}
+
+export function missedFlavorReportCount() {
+  return storyDatabase.missedFlavorReports.count()
 }
 
 function splitChapterContent(content: string) {
@@ -1495,6 +1572,39 @@ export async function upsertPreferenceSignal(input: {
   })
 }
 
+/**
+ * Stores a rewrite-adoption preference without a feedback record. signalKey is
+ * a stable per-rule key: re-adoptions overwrite the same row and refresh its
+ * updatedAt, so recently repeated issues surface first in context listing.
+ */
+export async function upsertDerivedPreferenceSignal(input: {
+  projectId: string
+  signalKey: string
+  dimension: PreferenceDimension
+  instruction: string
+}) {
+  const instruction = input.instruction.trim().replace(/\s+/g, ' ').slice(0, 180)
+  if (!instruction) throw new Error('偏好说明不能为空')
+  if (!/^(?:后续|继续|避免|少用|多用|保持|让)/.test(instruction)) throw new Error('偏好说明需要描述后续写作方式')
+  const projectId = requiredFeedbackString(input.projectId, '作品 ID')
+  if (!/^[a-z0-9-]{1,80}$/.test(input.signalKey)) throw new Error('偏好信号键无效')
+  const verdict: Feedback['verdict'] = 'down'
+  const now = Date.now()
+  return storyDatabase.transaction('rw', storyDatabase.preferenceSignals, async () => {
+    const id = `preference-derived-${input.signalKey}`
+    const fingerprint = hashTextImpl(`${verdict}:${input.dimension}:${instruction}`)
+    const existing = await storyDatabase.preferenceSignals.get(id)
+    const signal: PreferenceSignal = {
+      id, projectId, feedbackId: undefined,
+      verdict, dimension: input.dimension, instruction,
+      source: 'user', fingerprint,
+      createdAt: existing?.createdAt ?? now, updatedAt: now,
+    }
+    await storyDatabase.preferenceSignals.put(signal)
+    return signal
+  })
+}
+
 function hasValidParagraphFingerprint(paragraph: StoredParagraph) {
   return typeof paragraph.text === 'string'
     && paragraph.text.trim().length > 0
@@ -1615,7 +1725,7 @@ export async function createProject(title: string) {
     id: projectId,
     title: title.trim(),
     themeId: 'neutral',
-    illustrationMode: 'auto',
+    illustrationMode: 'none',
     writingInstructions: '',
     createdAt: now,
     updatedAt: now,

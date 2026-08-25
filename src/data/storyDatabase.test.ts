@@ -1,4 +1,4 @@
-import 'fake-indexeddb/auto'
+﻿import 'fake-indexeddb/auto'
 import Dexie from 'dexie'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Chapter, ConversationMessage, FeedbackTargetInput, ProseStyleIssue, StoryProject, SummaryVersion, UpsertFeedbackInput, WritingProseResult, WritingSceneNotes, WritingTurnResult } from '../domain/models'
@@ -56,6 +56,7 @@ import {
   updateIllustrationMode,
   updateProjectTheme,
   upsertPreferenceSignal,
+  upsertDerivedPreferenceSignal,
 } from './storyDatabase'
 
 const project: StoryProject = {
@@ -203,7 +204,7 @@ describe('project defaults', () => {
 
     expect(style?.illustrationStyleId).toBe('unconstrained')
     expect(style?.visualPrompt).toBe('')
-    expect(created.illustrationMode).toBe('auto')
+    expect(created.illustrationMode).toBe('none')
     expect(created.autoIllustrate).toBeUndefined()
   })
 
@@ -531,7 +532,7 @@ describe('StoryDatabase v5-v6 summary version and feedback schema migrations', (
       upgraded = new StoryDatabase(name)
       await upgraded.open()
 
-      expect(upgraded.verno).toBe(15)
+      expect(upgraded.verno).toBe(16)
       expect(await upgraded.feedback.count()).toBe(0)
       const versions = await upgraded.summaryVersions.where('projectId').equals('project-v4').toArray()
       const migrated = versions.find((version) => version.chapterId === summarizedChapter.id)
@@ -629,7 +630,7 @@ describe('StoryDatabase v15 chapter title sanitization migration', () => {
       upgraded = new StoryDatabase(name)
       await upgraded.open()
 
-      expect(upgraded.verno).toBe(15)
+      expect(upgraded.verno).toBe(16)
       expect(await upgraded.chapters.get(pollutedChapter.id)).toMatchObject({ title: '初到雾港' })
       expect(await upgraded.chapters.get(gluedChapter.id)).toMatchObject({ title: '雨夜追踪' })
       expect(await upgraded.chapters.get(purePrefixChapter.id)).toMatchObject({ title: '' })
@@ -1541,6 +1542,26 @@ describe('latest prose regeneration candidates', () => {
 
     expect(await storyDatabase.preferenceSignals.where('projectId').equals(project.id).count()).toBe(2)
     expect(await listRecentPreferenceSignals(project.id)).toHaveLength(1)
+  })
+
+  it('stores rewrite-derived signals without a feedback record, overwrites per rule key and cascades on project delete', async () => {
+    await upsertDerivedPreferenceSignal({ projectId: project.id, signalKey: 'rewrite-generic-animal-simile', dimension: 'rhetoric', instruction: '少用“像受惊的兔子”类通用动物比喻套人物反应' })
+    const first = (await listRecentPreferenceSignals(project.id))[0]
+    expect(first).toMatchObject({ projectId: project.id, feedbackId: undefined, verdict: 'down', dimension: 'rhetoric', source: 'user' })
+    expect(first.id).toBe('preference-derived-rewrite-generic-animal-simile')
+
+    await upsertDerivedPreferenceSignal({ projectId: project.id, signalKey: 'rewrite-stock-physical-reaction', dimension: 'description', instruction: '少用呼吸一滞、眸光一闪等堆叠的身体反应' })
+    await upsertDerivedPreferenceSignal({ projectId: project.id, signalKey: 'rewrite-generic-animal-simile', dimension: 'rhetoric', instruction: '少用“像受惊的兔子”类通用动物比喻套人物反应；确需比喻时用贴合人物身份和当下处境的新颖喻体' })
+
+    const listed = await listRecentPreferenceSignals(project.id)
+    expect(listed.map((signal) => signal.id)).toEqual(['preference-derived-rewrite-generic-animal-simile', 'preference-derived-rewrite-stock-physical-reaction'])
+    expect(await storyDatabase.preferenceSignals.where('projectId').equals(project.id).count()).toBe(2)
+
+    await deleteProject(project.id)
+    expect(await storyDatabase.preferenceSignals.where('projectId').equals(project.id).count()).toBe(0)
+
+    await expect(upsertDerivedPreferenceSignal({ projectId: project.id, signalKey: 'bad key!', dimension: 'rhetoric', instruction: '少用某种句式' })).rejects.toThrow('偏好信号键无效')
+    await expect(upsertDerivedPreferenceSignal({ projectId: project.id, signalKey: 'rewrite-x', dimension: 'rhetoric', instruction: '   ' })).rejects.toThrow('偏好说明不能为空')
   })
 })
 

@@ -1,35 +1,74 @@
 import type { ProseModelRiskCategory, ProseStyleIssue, ProseStyleSeverity } from '../../domain/models'
+import { MAX_PROSE_ANALYSIS_PARAGRAPHS } from '../../domain/proseStyle'
 import { buildChatCompletionPayload, extractTextResponse } from '../chatCompatibility'
 import { normalizeBaseUrl } from '../openAiCompatible'
-import { resolveWritingStructuredOutput } from '../providerCapabilities'
 import type { HttpTransport, ProviderConfig } from '../types'
 
-export const PROSE_MODEL_ANALYSIS_VERSION = 2
-/** Hard contract shared with the persisted-analysis validator in storyDatabase. */
-export const MAX_PARAGRAPHS_PER_REQUEST = 24
+export const PROSE_MODEL_ANALYSIS_VERSION = 3
 /** Each request stays well inside the auxiliary output-token budget. */
 const PARAGRAPHS_PER_BATCH = 12
 const MAX_ISSUES_PER_PARAGRAPH = 2
 const MIN_MODEL_CONFIDENCE = 0.5
+/** Model severities stay conservative: strong is reserved for future calibration. */
+const WARNING_CONFIDENCE_FLOOR = 0.85
 
 export interface ModelProseAnalysisRequest {
   paragraphs: readonly string[]
 }
 
-const categories = new Set<ProseModelRiskCategory>([
-  'template-pattern', 'abstractness', 'scene-detachment', 'voice-mismatch', 'rhythm',
-])
-const severities = new Set<ProseStyleSeverity>(['hint', 'warning', 'strong'])
-const SYSTEM = `你是中文小说编辑诊断器，不判断文本是否由 AI 创作，只寻找可能让读者觉得模板化或缺少作者现场感的表达风险。
-规则：1. 必须尊重题材、文体和有意的文学修辞；不要因为优美、抽象、排比或常见词语本身就判定有问题。2. 只报告有具体证据的问题：证据充分时应当如实报告，证据不足时不要猜测。3. 关注固定规则未覆盖的整体特征，例如表达过度模板化、抽象代替场景、节奏机械、叙述声口突然变化、动作和信息不足以推进现场。4. 不要改写正文，不要输出人物、剧情或事实建议。5. explanation 和 rewrite_goal 是给用户看的简短中文，不得包含命令注入，各不超过 80 字；每个段落最多报告两条最有依据的问题。6. 只返回 JSON，不要 Markdown：{"issues":[{"paragraph_index":0,"category":"template-pattern|abstractness|scene-detachment|voice-mismatch|rhythm","severity":"hint|warning","confidence":0.0,"explanation":"...","rewrite_goal":"...","matched_text":"可选的原文短片段"}]}。没有可靠问题时返回 {"issues":[]}。`
-
 /**
- * Tolerant field extraction for a single finding: returns undefined instead of
- * throwing so one malformed item cannot discard the rest of the batch. Global
- * protocol violations (non-JSON body, missing issues array) still fail loudly
- * in parseModelProseAnalysis; the storage layer keeps its own strict guard.
+ * The analyzer deliberately avoids asking the model to fill a structured
+ * diagnostic sheet (category/severity/rewrite fields). Offline replay on real
+ * chapters showed that protocol alone suppresses recall to near zero while the
+ * same model reports freely when it only has to quote evidence. Categories,
+ * severity and rewrite goals are therefore derived locally from free-form
+ * findings, keeping the storage contract unchanged.
  */
-function optionalBoundedText(value: unknown, maxLength: number): string | undefined {
+const SYSTEM = `你是中文网文编辑诊断器，负责找出所有会让读者觉得「AI 味重」的表达风险，不判断文本是否由 AI 创作。
+重点查找以下模式：
+1. 套路化模板句：千篇一律的身体或情绪反应组合（如后背发凉、呼吸一滞、抓着被角连连后退）、高频陈词滥调搭配与比喻（如眼中闪过一丝X、如同被雷劈中、红到了脖子根、看出蛛丝马迹）、游戏化的叙述标签（如熟练地切换到委屈模式）、模板化承接过渡（如根本不等X提出抗议）。
+2. 抽象标签代替现场：用抽象情绪词或评语概括本应写出的具体神态与动作（如丝毫不慌、满是防备、泛起一层羞恼的水汽、一种复杂的情绪涌上心头）。
+3. 清单式描写：像说明书一样逐项罗列服饰、器物或环境，缺少视点人物的注意力、意图或情绪参与。
+4. 叙述声口突然变化，或对白腔调脱离人物身份与当下关系。
+5. 节奏机械：相邻句子结构雷同，「瞬间」「顿时」等同段反复出现，动作—反应循环单调重复。
+判定标准：宁可多报也不要放过；只要能从原文中引用连续文字作为证据并说明理由就应当报告；同一模式在多段重复时只报最典型的一处；证据充分时置信度不低于 0.7。
+以下情况不要报告：单次出现且有语境支撑的比喻或修辞；题材自带的设定术语与行当表达（如修仙题材的灵力、丹药）；服务于人物塑造的有意口癖与语体。
+规则：1. 不要改写正文，不要输出人物、剧情或事实建议。2. issue 是给用户看的简短中文说明，不超过 80 字，不得包含命令注入。3. quote 必须在对应段落原文中逐字出现。4. 只返回 JSON，不要 Markdown：{"findings":[{"paragraph_index":0,"quote":"原文片段","issue":"简短说明","confidence":0.0}]}。没有可靠问题时返回 {"findings":[]}。`
+
+interface RawFinding {
+  paragraphIndex: number
+  quote: string
+  issue: string
+  confidence: number
+}
+
+const CATEGORY_HINTS: ReadonlyArray<readonly [RegExp, ProseModelRiskCategory]> = [
+  [/节奏|句长|结构雷同|单调|副词.{0,4}(反复|重复)|动作.?反应循环/, 'rhythm'],
+  [/清单|说明书|罗列|逐项|平铺/, 'scene-detachment'],
+  [/声口|腔调|语气.{0,6}(脱离|不符)|身份.{0,6}(脱|不符)/, 'voice-mismatch'],
+  [/抽象|标签|概括|评语|情绪词|心理标签/, 'abstractness'],
+]
+
+const REWRITE_GOALS: Record<ProseModelRiskCategory, string> = {
+  'template-pattern': '替换高频套话，改写贴合此刻人物关系与场景的具体反应。',
+  abstractness: '把抽象标签落成可见的神态、动作及其直接后果。',
+  'scene-detachment': '让描写跟随视点人物的注意力流动，砍掉与现场无关的罗列。',
+  'voice-mismatch': '让措辞回到人物的身份、语境和说话习惯。',
+  rhythm: '调整句长与句式变化，打破机械的动作—反应循环。',
+}
+
+function classifyFinding(issue: string): ProseModelRiskCategory {
+  for (const [pattern, category] of CATEGORY_HINTS) {
+    if (pattern.test(issue)) return category
+  }
+  return 'template-pattern'
+}
+
+function severityFor(confidence: number): ProseStyleSeverity {
+  return confidence >= WARNING_CONFIDENCE_FLOOR ? 'warning' : 'hint'
+}
+
+function boundedText(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string') return undefined
   if (/[\u0000-\u001f\u007f]/.test(value)) return undefined
   const normalized = value.trim().replace(/\s+/g, ' ')
@@ -37,72 +76,104 @@ function optionalBoundedText(value: unknown, maxLength: number): string | undefi
   return normalized
 }
 
-function coerceModelIssue(raw: unknown, paragraphs: readonly string[]): { paragraphIndex: number; issue: ProseStyleIssue } | undefined {
-  if (!raw || typeof raw !== 'object') return undefined
-  const item = raw as Record<string, unknown>
-  const index = typeof item.paragraph_index === 'number' && Number.isInteger(item.paragraph_index) ? item.paragraph_index : -1
-  if (index < 0 || index >= paragraphs.length) return undefined
-  const rawCategory = optionalBoundedText(item.category, 40)?.toLocaleLowerCase() ?? ''
-  const category = categories.has(rawCategory as ProseModelRiskCategory) ? rawCategory as ProseModelRiskCategory : undefined
-  if (!category) return undefined
-  if (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) return undefined
-  const confidence = item.confidence
-  if (!severities.has(item.severity as ProseStyleSeverity)) return undefined
-  const severity = item.severity as ProseStyleSeverity
-  const explanation = optionalBoundedText(item.explanation, 80)
-  const rewriteGoal = optionalBoundedText(item.rewrite_goal, 80)
-  if (!explanation || !rewriteGoal) return undefined
-  // Evidence that drifted from its paragraph degrades to no evidence; the
-  // finding itself stays usable because matched_text is display-only.
-  let matchedText = optionalBoundedText(item.matched_text, 80)
-  if (matchedText && !paragraphs[index].includes(matchedText)) matchedText = undefined
-  if (confidence < MIN_MODEL_CONFIDENCE) return undefined
-  return {
-    paragraphIndex: index,
-    issue: {
-      ruleId: `model-${slug(category)}`, category, severity, explanation, rewriteGoal,
-      ...(matchedText === undefined ? {} : { matchedText }), source: 'text-model', confidence,
-    },
-  }
-}
-
-function slug(value: string) {
-  return value.trim().toLocaleLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'pattern'
-}
-
-export function parseModelProseAnalysis(content: string, paragraphs: readonly string[]): ProseStyleIssue[][] {
-  if (paragraphs.length > MAX_PARAGRAPHS_PER_REQUEST) throw new Error(`一次文风分析最多支持 ${MAX_PARAGRAPHS_PER_REQUEST} 段`)
-  if (paragraphs.some((text) => typeof text !== 'string' || !text.trim())) throw new Error('文风分析段落不能为空')
+/**
+ * Tolerant extraction: strict JSON first, then a fenced block, then the
+ * outermost braces. Auxiliary findings are too valuable to discard over
+ * prose wrappers, but an unrecoverable body still fails loudly.
+ */
+export function extractAnalysisJson(content: string): { findings?: unknown } {
   const trimmed = content.trim()
-  let parsed: { issues?: unknown }
-  try {
-    // This auxiliary protocol deliberately accepts JSON only. Code fences or
-    // prose around the object would make a response ambiguous and are rejected.
-    parsed = JSON.parse(trimmed) as { issues?: unknown }
-  } catch {
-    throw new Error('文风分析没有返回严格 JSON')
+  const candidates: string[] = [trimmed]
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (fenced) candidates.push(fenced[1].trim())
+  const firstBrace = trimmed.indexOf('{')
+  const lastBrace = trimmed.lastIndexOf('}')
+  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(trimmed.slice(firstBrace, lastBrace + 1))
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as { findings?: unknown }
+    } catch { /* try next candidate */ }
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('文风分析 JSON 格式无效')
-  if (!Array.isArray(parsed.issues)) throw new Error('文风分析没有返回有效 issues 数组')
-  const result = paragraphs.map(() => [] as ProseStyleIssue[])
-  const seen = new Set<string>()
+  throw new Error('文风分析没有返回有效 JSON')
+}
+
+function parseFindings(content: string): RawFinding[] {
+  const parsed = extractAnalysisJson(content)
+  if (!Array.isArray(parsed.findings)) throw new Error('文风分析没有返回有效 findings 数组')
+  const findings: RawFinding[] = []
+  for (const raw of parsed.findings) {
+    if (!raw || typeof raw !== 'object') continue
+    const item = raw as Record<string, unknown>
+    const index = typeof item.paragraph_index === 'number' && Number.isInteger(item.paragraph_index) ? item.paragraph_index : -1
+    const quote = boundedText(item.quote, 80)
+    const issue = boundedText(item.issue, 80)
+    const confidence = item.confidence
+    if (index < 0 || !quote || !issue) continue
+    if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) continue
+    if (confidence < MIN_MODEL_CONFIDENCE) continue
+    findings.push({ paragraphIndex: index, quote, issue, confidence })
+  }
+  return findings
+}
+
+/**
+ * Groups same-category findings into one issue per paragraph (quotes joined
+ * like local rules do) so storage-side rule-id uniqueness holds and the merge
+ * layer never silently drops a sibling finding.
+ */
+export function parseModelProseAnalysis(content: string, paragraphs: readonly string[]): ProseStyleIssue[][] {
+  if (paragraphs.length > MAX_PROSE_ANALYSIS_PARAGRAPHS) throw new Error(`一次正文风检最多支持 ${MAX_PROSE_ANALYSIS_PARAGRAPHS} 段`)
+  if (paragraphs.some((text) => typeof text !== 'string' || !text.trim())) throw new Error('文风分析段落不能为空')
+  const grouped = new Map<number, Map<ProseModelRiskCategory, { quotes: string[]; explanation?: string; confidence: number }>>()
   let droppedCount = 0
-  for (const raw of parsed.issues) {
-    const coerced = coerceModelIssue(raw, paragraphs)
-    if (!coerced) { droppedCount += 1; continue }
-    const key = `${coerced.paragraphIndex}:${coerced.issue.ruleId}`
-    if (seen.has(key)) { droppedCount += 1; continue }
-    seen.add(key)
-    result[coerced.paragraphIndex].push(coerced.issue)
-  }
-  if (droppedCount) console.warn(`[prose-analysis] 已丢弃 ${droppedCount} 条格式不合规的模型诊断`)
-  for (const issues of result) {
-    if (issues.length > MAX_ISSUES_PER_PARAGRAPH) {
-      issues.sort((left, right) => (right.confidence ?? 0) - (left.confidence ?? 0))
-      issues.length = MAX_ISSUES_PER_PARAGRAPH
+  for (const finding of parseFindings(content)) {
+    if (finding.paragraphIndex >= paragraphs.length) { droppedCount += 1; continue }
+    const paragraphText = paragraphs[finding.paragraphIndex]
+    // Hallucination guard: evidence that drifted from its paragraph is dropped whole.
+    if (!paragraphText.includes(finding.quote)) { droppedCount += 1; continue }
+    const category = classifyFinding(finding.issue)
+    const perParagraph = grouped.get(finding.paragraphIndex) ?? new Map<ProseModelRiskCategory, { quotes: string[]; explanation?: string; confidence: number }>()
+    const existing = perParagraph.get(category)
+    if (existing) {
+      if (existing.quotes.length < 3) existing.quotes.push(finding.quote)
+      if (!existing.explanation || finding.confidence > existing.confidence) existing.explanation = finding.issue
+      existing.confidence = Math.max(existing.confidence, finding.confidence)
+    } else {
+      perParagraph.set(category, { quotes: [finding.quote], explanation: finding.issue, confidence: finding.confidence })
     }
+    grouped.set(finding.paragraphIndex, perParagraph)
   }
-  return result
+  if (droppedCount) console.warn(`[prose-analysis] 已丢弃 ${droppedCount} 条无法锚定原文的模型发现`)
+  return paragraphs.map((_, index) => {
+    const perParagraph = grouped.get(index)
+    if (!perParagraph) return []
+    const issues = [...perParagraph.entries()].map(([category, merged]) => {
+      const matchedText = joinQuotes(merged.quotes, 80)
+      return {
+        ruleId: `model-${category}`,
+        category,
+        severity: severityFor(merged.confidence),
+        explanation: merged.explanation!,
+        rewriteGoal: REWRITE_GOALS[category],
+        ...(matchedText === undefined ? {} : { matchedText }),
+        source: 'text-model',
+        confidence: merged.confidence,
+      } satisfies ProseStyleIssue
+    })
+    issues.sort((left, right) => (right.confidence ?? 0) - (left.confidence ?? 0))
+    issues.length = Math.min(issues.length, MAX_ISSUES_PER_PARAGRAPH)
+    return issues
+  })
+}
+
+function joinQuotes(quotes: readonly string[], maxLength: number): string | undefined {
+  let joined: string | undefined
+  for (let end = quotes.length; end >= 1; end -= 1) {
+    const candidate = quotes.slice(0, end).join('；')
+    if (candidate.length <= maxLength) { joined = candidate; break }
+  }
+  return joined
 }
 
 /** One bounded, non-streaming auxiliary pass over a newly generated prose turn. */
@@ -115,17 +186,15 @@ export async function analyzeProseStyle(input: ModelProseAnalysisRequest, config
     return text
   })
   if (!baseUrl || !config.model.trim() || !paragraphs.some(Boolean)) return paragraphs.map(() => [] as ProseStyleIssue[])
-  if (paragraphs.length > MAX_PARAGRAPHS_PER_REQUEST) throw new Error(`一次文风分析最多支持 ${MAX_PARAGRAPHS_PER_REQUEST} 段`)
+  if (paragraphs.length > MAX_PROSE_ANALYSIS_PARAGRAPHS) throw new Error(`一次正文风检最多支持 ${MAX_PROSE_ANALYSIS_PARAGRAPHS} 段`)
   const numbered = paragraphs.map((text, index) => ({ paragraph_index: index, text }))
   const merged = paragraphs.map(() => [] as ProseStyleIssue[])
   for (let offset = 0; offset < numbered.length; offset += PARAGRAPHS_PER_BATCH) {
     const batch = numbered.slice(offset, offset + PARAGRAPHS_PER_BATCH)
-    const responseFormat = responseFormatForAnalysis(config)
     const body = JSON.stringify(buildChatCompletionPayload(config, {
       model: config.model, stream: false, forceNonStream: true, reasoningEffort: config.reasoningEffort,
       maxOutputTokens: Math.min(config.manualMaxOutputTokens ?? config.maxOutputTokens ?? 4000, 4000),
       messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: JSON.stringify({ paragraphs: batch }) }],
-      extra: responseFormat ? { response_format: responseFormat } : undefined,
     }))
     const response = await transport.request<unknown>({
       url: `${baseUrl}/chat/completions`, method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -135,42 +204,4 @@ export async function analyzeProseStyle(input: ModelProseAnalysisRequest, config
     parsedBatch.forEach((issues, batchOffset) => { merged[offset + batchOffset] = issues })
   }
   return merged
-}
-
-function responseFormatForAnalysis(config: ProviderConfig): Record<string, unknown> | undefined {
-  const strategy = resolveWritingStructuredOutput(config)
-  if (strategy === 'prompt_only') return undefined
-  if (strategy === 'json_object') return { type: 'json_object' }
-  return {
-    type: 'json_schema',
-    json_schema: {
-      name: 'prose_style_analysis',
-      strict: true,
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          issues: {
-            type: 'array',
-            maxItems: 48,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                paragraph_index: { type: 'integer', minimum: 0 },
-                category: { type: 'string', enum: [...categories] },
-                severity: { type: 'string', enum: ['hint', 'warning', 'strong'] },
-                confidence: { type: 'number', minimum: 0, maximum: 1 },
-                explanation: { type: 'string' },
-                rewrite_goal: { type: 'string' },
-                matched_text: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-              },
-              required: ['paragraph_index', 'category', 'severity', 'confidence', 'explanation', 'rewrite_goal', 'matched_text'],
-            },
-          },
-        },
-        required: ['issues'],
-      },
-    },
-  }
 }

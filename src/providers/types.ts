@@ -48,6 +48,22 @@ export interface ProviderCapabilities {
 
 export type RequestAuth = { kind: 'bearer'; secretRef: SecretRef }
 
+/**
+ * 一个用户为本供应商收藏的常用模型。切换当前模型时会整体恢复这里的
+ * per-model 字段，让每个模型记住自己的窗口与手动覆盖值。
+ */
+export interface SavedModelEntry {
+  id: string
+  ownedBy?: string
+  /** 来自 /models 列表的 provider 元数据。 */
+  contextLength?: number
+  maxOutputTokens?: number
+  manualContextLength?: number
+  manualMaxOutputTokens?: number
+  /** 该模型上次使用的思考等级；同供应商内不同模型的合法档位差异很大。 */
+  reasoningEffort?: ReasoningEffort
+}
+
 export interface ProviderConfig {
   id: string
   name: string
@@ -63,6 +79,8 @@ export interface ProviderConfig {
   reasoningEffort?: ReasoningEffort
   /** Provider capability model; absent keeps legacy auto-inference behavior. */
   capabilities?: ProviderCapabilities
+  /** 收藏的常用模型；顶层 per-model 字段始终是"当前选中项"的投影。 */
+  savedModels?: SavedModelEntry[]
 }
 
 export interface ProviderSettings {

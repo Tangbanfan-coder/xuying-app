@@ -1,6 +1,7 @@
 export {
   buildContextBudgetPlan,
   contextCompressionStageForPressure,
+  CONTEXT_BUDGET_RATIOS,
   CONTEXT_COMPRESSION_PRESSURE_THRESHOLDS,
   type BuildContextBudgetPlanInput,
   type ContextBudgetPlan,

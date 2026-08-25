@@ -21,11 +21,11 @@ interface ContextUsageProps extends ContextUsageDetailsProps {
   compactLabel?: string
 }
 
-function formatTokens(value: number) {
+export function formatTokens(value: number) {
   return Math.max(0, Math.round(value)).toLocaleString('zh-CN')
 }
 
-function formatCompactTokens(value: number) {
+export function formatCompactTokens(value: number) {
   const rounded = Math.max(0, Math.round(value))
   if (rounded < 1_000) return rounded.toLocaleString('zh-CN')
   if (rounded < 1_000_000) return `${Number((rounded / 1_000).toFixed(1))}k`

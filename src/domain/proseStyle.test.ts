@@ -1,5 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { detectProseStyleIssues, PROSE_STYLE_RULES } from './proseStyle'
+import { detectProseStyleIssues, PROSE_STYLE_RULES, rewritePreferenceForRule } from './proseStyle'
+
+describe('rewritePreferenceForRule', () => {
+  it('covers every local rule with a valid generation-side instruction', () => {
+    const dimensions = new Set(['plot', 'character', 'dialogue', 'pace', 'description', 'rhetoric', 'emotion', 'ending'])
+    for (const rule of PROSE_STYLE_RULES) {
+      const preference = rewritePreferenceForRule(rule.id)
+      expect(preference, `missing rewrite preference for ${rule.id}`).toBeDefined()
+      expect(dimensions.has(preference!.dimension)).toBe(true)
+      expect(/^(?:后续|继续|避免|少用|多用|保持|让)/.test(preference!.instruction)).toBe(true)
+      expect(preference!.instruction.length).toBeLessThanOrEqual(180)
+    }
+    expect(rewritePreferenceForRule('unknown-rule')).toBeUndefined()
+  })
+
+  it('bans template pairings without banning the rhetorical device itself', () => {
+    expect(rewritePreferenceForRule('generic-animal-simile')?.instruction).toContain('新颖喻体')
+    for (const preference of ['generic-animal-simile', 'template-calm-as-everyday'].map((id) => rewritePreferenceForRule(id)!)) {
+      expect(preference.instruction).not.toMatch(/不得使用比喻|禁止比喻|不要用比喻/)
+    }
+  })
+})
 
 describe('detectProseStyleIssues', () => {
   it('uses stable rule ids for representative novel style patterns', () => {
@@ -18,12 +39,21 @@ describe('detectProseStyleIssues', () => {
     expect(new Set(PROSE_STYLE_RULES.map((rule) => rule.id)).size).toBe(PROSE_STYLE_RULES.length)
   })
 
-  it('applies density thresholds and explicit ordinary-language exceptions', () => {
-    expect(detectProseStyleIssues(['这不是钥匙，而是一枚旧徽章。'])[0]).toEqual([])
+  it('flags every contrast construction, including single concrete corrections', () => {
+    expect(detectProseStyleIssues(['这不是钥匙，而是一枚旧徽章。'])[0].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
     expect(detectProseStyleIssues(['“不是我。”她说，“是门外的人。”'])[0]).toEqual([])
     expect(detectProseStyleIssues(['那不是迟疑，而是恐惧；不是退缩，而是等待。'])[0].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
     expect(detectProseStyleIssues(['她呼吸一滞，随即关上窗。'])[0]).toEqual([])
     expect(detectProseStyleIssues(['她呼吸一滞，眸光一闪，指节泛白。'])[0].map((issue) => issue.ruleId)).toContain('stock-physical-reaction')
+  })
+
+  it('covers contrast variants beyond the literal 不是…而是 form', () => {
+    for (const text of ['那不像是拒绝，更像是疲惫。', '这并非失败，而是一次校准。', '那不再是等待，就是放弃。']) {
+      expect(detectProseStyleIssues([text])[0].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
+    }
+    const two = detectProseStyleIssues(['窗台上的不是灰尘，而是一层薄霜。', '他摇摇头，那不是敷衍，就是默许。'])
+    expect(two[0].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
+    expect(two[1].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
   })
 
   it('does not flag concrete prose without the targeted patterns', () => {
@@ -37,11 +67,22 @@ describe('detectProseStyleIssues', () => {
     expect(detectProseStyleIssues(['她像一只小鹿般缩到窗边。'])[0].map((issue) => issue.ruleId)).toContain('generic-animal-simile')
     expect(detectProseStyleIssues(['门口好像有一只猫，正在啃鱼骨。'])[0]).toEqual([])
     expect(detectProseStyleIssues(['“不是我，而是他拿走了信。”她说。'])[0].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
-    expect(detectProseStyleIssues(['这不是钥匙，而是一枚旧徽章。'])[0]).toEqual([])
+    expect(detectProseStyleIssues(['这不是钥匙，而是一枚旧徽章。'])[0].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
     expect(detectProseStyleIssues(['那不是笑意，而是一种无声的警告。'])[0].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
-    expect(detectProseStyleIssues(['那不是门响，而是风吹动了插销。'])[0]).toEqual([])
+    expect(detectProseStyleIssues(['那不是门响，而是风吹动了插销。'])[0].map((issue) => issue.ruleId)).toContain('contrast-not-but-density')
     expect(detectProseStyleIssues(['这不是迟疑，而是等待。', '那不是拒绝，而是试探。', '门后的声音不是哭声，而是水管在响。']).every((issues) => issues.some((issue) => issue.ruleId === 'contrast-not-but-density'))).toBe(true)
     expect(detectProseStyleIssues(['“如果你再骗我，以后我就不见你了。”'])[0].map((issue) => issue.ruleId)).toContain('conditional-dialogue-ultimatum')
+  })
+
+  it('covers the widened vocabulary added after real-world misses', () => {
+    expect(detectProseStyleIssues(['他说得很平静，像是在聊今天的天气。'])[0].map((issue) => issue.ruleId)).toContain('template-calm-as-everyday')
+    expect(detectProseStyleIssues(['她像一只受惊的雀，扑棱着退到墙角。'])[0].map((issue) => issue.ruleId)).toContain('generic-animal-simile')
+    expect(detectProseStyleIssues(['“那才叫真正的强大。”'])[0].map((issue) => issue.ruleId)).toContain('concept-label-this-is-called')
+    expect(detectProseStyleIssues(['“你这不是批评，我这是在帮你争取机会。”'])[0].map((issue) => issue.ruleId)).toContain('defensive-benefactive-reframing')
+    expect(detectProseStyleIssues(['一种说不清道不明的心绪袭来。'])[0].map((issue) => issue.ruleId)).toContain('abstract-emotion-telling')
+    expect(detectProseStyleIssues(['他后背发凉，喉咙发紧。'])[0].map((issue) => issue.ruleId)).toContain('stock-physical-reaction')
+    expect(detectProseStyleIssues(['“行了。”话中藏着一丝不耐。'])[0].map((issue) => issue.ruleId)).toContain('dialogue-explained-afterward')
+    expect(detectProseStyleIssues(['尾声：一切都将改变。'])[0].map((issue) => issue.ruleId)).toContain('generic-elevated-ending')
   })
 
   it('flags rhetorical “this is called” labels without rewriting or mistaking ordinary language for one', () => {
