@@ -51,7 +51,7 @@ import { PROSE_STYLE_RULE_VERSION, rewritePreferenceForRule } from './domain/pro
 import { resolveProjectIllustrationStyle } from './domain/illustrationStyles'
 import { resolveIllustrationMode, type AppearanceMode, type ContextBudget, type ConversationMessage, type Feedback, type FeedbackVerdict, type IllustrationMode, type IllustrationStylePresetId, type RewriteStrength, type StoredParagraph, type ThemePresetId } from './domain/models'
 import { browserTransport } from './providers/browserTransport'
-import { loadProviderSettings, saveProviderSettings, savedModelPatch, syncActiveModelIntoSaved } from './providers/config'
+import { loadProviderSettings, providerListKey, saveProviderSettings, savedModelPatch, switchActiveProvider, syncActiveModelIntoSaved } from './providers/config'
 import { loadGlobalWritingInstructions, saveGlobalWritingInstructions } from './providers/config'
 import { logImagePipeline } from './providers/imagePipelineLog'
 import { secretStore } from './providers/secretStore'
@@ -286,7 +286,9 @@ export default function App() {
 
   useEffect(() => {
     if (!toast) return
-    const timeout = window.setTimeout(() => setToast(undefined), 2600)
+    // Errors need to stay readable: several success toasts fire in a row right
+    // after a turn completes, and a 2.6s error was reported as unreadable.
+    const timeout = window.setTimeout(() => setToast(undefined), toast.kind === 'error' ? 6000 : 2600)
     return () => window.clearTimeout(timeout)
   }, [toast])
 
@@ -400,7 +402,7 @@ export default function App() {
     const entry = provider.savedModels?.find((model) => model.id === modelId)
     if (!entry || provider.model === modelId) return
     const nextProvider = { ...provider, ...savedModelPatch(entry) }
-    const key = slot === 'text' ? 'textProviders' : 'imageProviders'
+    const key = providerListKey(slot)
     const hasActiveProvider = providerSettings[key].some((item) => item.id === nextProvider.id)
     const nextSettings: ProviderSettings = {
       ...providerSettings,
@@ -409,6 +411,13 @@ export default function App() {
         ? providerSettings[key].map((item) => item.id === nextProvider.id ? nextProvider : item)
         : [nextProvider, ...providerSettings[key]],
     }
+    saveProviderSettings(nextSettings)
+    setProviderSettings(nextSettings)
+  }
+
+  function handleSwitchSlotProvider(slot: ProviderSlot, providerId: string) {
+    const nextSettings = switchActiveProvider(providerSettings, slot, providerId)
+    if (!nextSettings) return
     saveProviderSettings(nextSettings)
     setProviderSettings(nextSettings)
   }
@@ -427,21 +436,41 @@ export default function App() {
 
   async function handleIllustrationMode(illustrationMode: IllustrationMode) {
     if (!workspace) return
+    const previousMode = workspace.project.illustrationMode
     setWorkspace((current) => current ? {
       ...current,
       project: { ...current.project, illustrationMode },
     } : current)
-    await updateIllustrationMode(workspace.project.id, illustrationMode)
+    try {
+      await updateIllustrationMode(workspace.project.id, illustrationMode)
+    } catch (error) {
+      setWorkspace((current) => current ? {
+        ...current,
+        project: { ...current.project, illustrationMode: previousMode },
+      } : current)
+      showToast(error instanceof Error ? error.message : '配图方式保存失败', 'error')
+      throw error
+    }
     showToast(illustrationMode === 'none' ? '已切换为无图，后续只生成正文' : illustrationMode === 'manual' ? '已切换为按需配图，后续视觉建议需手动生成' : '已切换为自动配图，后续写作会自动进入图片队列')
   }
 
   async function handleContextBudgetChange(contextBudget: ContextBudget) {
     if (!workspace) return
+    const previousBudget = workspace.project.contextBudget
     setWorkspace((current) => current ? {
       ...current,
       project: { ...current.project, contextBudget },
     } : current)
-    await updateContextBudget(workspace.project.id, contextBudget)
+    try {
+      await updateContextBudget(workspace.project.id, contextBudget)
+    } catch (error) {
+      setWorkspace((current) => current ? {
+        ...current,
+        project: { ...current.project, contextBudget: previousBudget },
+      } : current)
+      showToast(error instanceof Error ? error.message : '上下文长度保存失败', 'error')
+      throw error
+    }
   }
 
   // Prose evaluation analytics are emitted per mounted prose paragraph (every
@@ -697,7 +726,7 @@ export default function App() {
         onOpenCharacterAssets={openCharacterAssets}
         onOpenReferenceImage={() => setReferenceImageOpen(true)}
         onReasoningEffortChange={handleReasoningEffortChange}
-        onIllustrationModeChange={(mode) => void handleIllustrationMode(mode)}
+        onIllustrationModeChange={(mode) => void handleIllustrationMode(mode).catch(() => undefined)}
       />
 
       <ProjectDrawer
@@ -746,6 +775,7 @@ export default function App() {
         providerSettings={providerSettings}
         onOpenProviderSettings={openProviderSettings}
         onSwitchProviderModel={handleSwitchProviderModel}
+        onSwitchSlotProvider={handleSwitchSlotProvider}
         appearanceMode={appearanceMode}
         onAppearanceChange={handleAppearanceChange}
       />

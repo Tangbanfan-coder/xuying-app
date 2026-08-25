@@ -133,6 +133,32 @@ export function createProviderConfig(slot: ProviderSlot): ProviderConfig {
   }
 }
 
+export type ProviderListKey = 'textProviders' | 'imageProviders'
+
+export function providerListKey(slot: ProviderSlot): ProviderListKey {
+  return slot === 'text' ? 'textProviders' : 'imageProviders'
+}
+
+/** 槽位的候选供应商；列表异常为空时用当前激活配置兜底，保证切换入口永远有选项。 */
+export function providersFor(settings: ProviderSettings, slot: ProviderSlot): ProviderConfig[] {
+  const list = settings[providerListKey(slot)]
+  return list?.length ? list : [settings[slot]]
+}
+
+/**
+ * 把槽位激活供应商切到列表中的另一家。返回新设置对象；
+ * 目标不存在或已是激活项时返回 null（无需变更）。
+ * 顶层与列表条目同步指向同一份深拷贝，避免共享引用被就地修改。
+ */
+export function switchActiveProvider(settings: ProviderSettings, slot: ProviderSlot, providerId: string): ProviderSettings | null {
+  if (settings[slot].id === providerId) return null
+  const key = providerListKey(slot)
+  const target = settings[key].find((provider) => provider.id === providerId)
+  if (!target) return null
+  const next = cloneProvider(target)
+  return { ...settings, [slot]: next, [key]: settings[key].map((provider) => provider.id === providerId ? next : provider) }
+}
+
 /** 切换模型时跟随模型一起恢复的字段；savedModels 条目是这些值的权威存储。 */
 const PER_MODEL_PATCH_KEYS = ['model', 'contextLength', 'maxOutputTokens', 'manualContextLength', 'manualMaxOutputTokens', 'reasoningEffort'] as const
 

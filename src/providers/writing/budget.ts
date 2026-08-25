@@ -4,7 +4,7 @@ import { tokenEstimatorMetadata, type ResolvedTokenEstimator } from '../tokenEst
 import type { ProviderConfig } from '../types'
 import { SYSTEM_PROMPT } from './prompt'
 
-const CONTEXT_BUDGET_RATIOS: Record<ContextBudget, number> = {
+export const CONTEXT_BUDGET_RATIOS: Record<ContextBudget, number> = {
   standard: 0.55,
   long: 0.75,
   full: 0.95,

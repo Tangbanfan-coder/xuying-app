@@ -9,6 +9,7 @@ import { resolveReasoningEffortOptions } from '../providers/endpointReasoningAda
 import type { ProviderConfig, ReasoningEffort } from '../providers/types'
 import type { ContextBudgetPlan } from '../providers/writing'
 import type { GenerationPhase } from '../hooks/useWritingTurnController'
+import { usePresence } from '../hooks/usePresence'
 import { focusTriggerUnlessTyping } from '../utils/menuFocus'
 
 interface ComposerProps {
@@ -45,6 +46,7 @@ export default function Composer({
   const [draft, setDraft] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [illustrationModeOpen, setIllustrationModeOpen] = useState(false)
+  const { present: modeMenuPresent, closing: modeMenuClosing } = usePresence(illustrationModeOpen, () => {}, 150)
   const [menuFlipped, setMenuFlipped] = useState(false)
   const [menuShiftX, setMenuShiftX] = useState(0)
   const illustrationModeControlRef = useRef<HTMLDivElement>(null)
@@ -135,7 +137,7 @@ export default function Composer({
               <button ref={illustrationModeTriggerRef} className="composer-tool-button auto-illustrate-button" type="button" aria-expanded={illustrationModeOpen} aria-haspopup="menu" aria-label={`配图模式：${illustrationMode === 'none' ? '无图' : illustrationMode === 'manual' ? '按需' : '自动'}`} onPointerDown={(event) => event.preventDefault()} onClick={() => setIllustrationModeOpen((open) => !open)}>
                 <ImagePlus size={17} aria-hidden="true" /><span>配图</span><strong>{illustrationMode === 'none' ? '无图' : illustrationMode === 'manual' ? '按需' : '自动'}</strong>
               </button>
-              {illustrationModeOpen && <div className={`illustration-mode-menu${menuFlipped ? ' illustration-mode-menu-flipped' : ''}`} role="menu" aria-label="选择配图模式" style={menuShiftX ? { translate: `${menuShiftX}px 0` } : undefined}>
+              {modeMenuPresent && <div className={`illustration-mode-menu${modeMenuClosing ? ' closing' : ''}${menuFlipped ? ' illustration-mode-menu-flipped' : ''}`} role="menu" aria-label="选择配图模式" style={menuShiftX ? { translate: `${menuShiftX}px 0` } : undefined}>
                 {([['none', '无图', '只写正文'], ['manual', '按需', '保存建议，手动生成'], ['auto', '自动', '自动生成插画']] as const).map(([mode, label, description]) => (
                   <button key={mode} type="button" role="menuitemradio" aria-checked={illustrationMode === mode} onPointerDown={(event) => event.preventDefault()} onClick={() => { onIllustrationModeChange(mode); setIllustrationModeOpen(false); focusTriggerUnlessTyping(illustrationModeTriggerRef.current) }}>
                     <span><strong>{label}</strong><small>{description}</small></span>{illustrationMode === mode && <Check size={15} aria-hidden="true" />}

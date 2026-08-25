@@ -1,10 +1,11 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+﻿import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, ImagePlus, LoaderCircle, Maximize2, Pencil, RefreshCcw, Save, Sparkles, Square, ThumbsDown, ThumbsUp, TriangleAlert, WandSparkles, X } from 'lucide-react'
-import { listMessageFeedback, listMessageParagraphsWithCurrentStyleIssues, storyDatabase, toggleFeedbackBatch, upsertPreferenceSignal } from '../data/storyDatabase'
+import { Check, ChevronDown, Flag, ImagePlus, LoaderCircle, Maximize2, Pencil, RefreshCcw, RotateCcw, Save, Sparkles, Square, ThumbsDown, ThumbsUp, TriangleAlert, WandSparkles, X } from 'lucide-react'
+import { deleteMissedFlavorReport, listMessageFeedback, listMessageParagraphsWithCurrentStyleIssues, listMissedFlavorReports, saveMissedFlavorReport, storyDatabase, toggleFeedbackBatch, upsertPreferenceSignal } from '../data/storyDatabase'
 import type { CharacterAsset, ConversationMessage, Feedback, FeedbackScope, FeedbackVerdict, IllustrationAsset, ProseStyleIssue, RewriteStrength, StoredParagraph, WritingCandidate } from '../domain/models'
 import { resolveIllustrationReferences } from '../domain/illustrationReferences'
 import { createParagraphFingerprint } from '../domain/paragraphs'
+import { saveEvaluationReport } from '../providers/evaluationExport'
 import { resolveImageSource } from '../providers/imageAssetStore'
 import { usePresence } from '../hooks/usePresence'
 
@@ -16,6 +17,15 @@ type ParagraphAnchor = {
 }
 
 export type IllustrationGenerationStage = 'waiting' | 'downloading' | 'saving' | 'validating'
+
+/**
+ * Bounded self-healing for the per-chapter style-issue load: a transient
+ * IndexedDB failure (e.g. the WebView reclaiming the connection while the app
+ * was backgrounded mid-generation) must not permanently blank every 可优化
+ * trigger until some unrelated refresh happens to rerun this effect.
+ */
+const PROSE_PARAGRAPH_LOAD_RETRY_MS = 3_000
+const PROSE_PARAGRAPH_LOAD_MAX_RETRIES = 5
 
 export function illustrationGenerationStageText(stage: IllustrationGenerationStage | undefined) {
   if (stage === 'downloading') return '正在接收图片'
@@ -299,12 +309,13 @@ function EditableUserMessage({ message, canEdit, onSave }: { message: Conversati
 }
 
 function FeedbackProse({ message, onRewriteParagraph, onApplyRewrite, onProseEvaluation, canRegenerate, writingCandidate, regenerationBusy, writingBusy, onRegenerateProse, onKeepOriginalProse, onAdoptCandidateProse, onAnalyzeFeedbackPreference }: { message: ConversationMessage; onRewriteParagraph?: (input: { message: ConversationMessage; paragraph: StoredParagraph; strength: RewriteStrength }) => Promise<string>; onApplyRewrite?: (input: { message: ConversationMessage; paragraph: StoredParagraph; rewrittenText: string }) => Promise<void>; onProseEvaluation?: (event: { type: 'analyzed' | 'rewrite_opened' | 'rewrite_kept_original'; message: ConversationMessage; paragraph: StoredParagraph }) => void; canRegenerate?: boolean; writingCandidate?: WritingCandidate; regenerationBusy?: boolean; writingBusy?: boolean; onRegenerateProse?: (message: ConversationMessage) => void; onKeepOriginalProse?: (message: ConversationMessage) => Promise<void>; onAdoptCandidateProse?: (message: ConversationMessage) => Promise<void>; onAnalyzeFeedbackPreference?: (input: { feedback: Feedback[]; verdict: FeedbackVerdict; reason?: string; targetTexts: string[] }) => Promise<void> }) {
-  const [panelOpen, setPanelOpen] = useState(false)
+  const [activePanel, setActivePanel] = useState<'feedback' | 'flavor' | null>(null)
   const [feedback, setFeedback] = useState<Feedback[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [selectedVerdict, setSelectedVerdict] = useState<FeedbackVerdict>('up')
   const [storedParagraphs, setStoredParagraphs] = useState<StoredParagraph[]>([])
+  const [loadRetryAttempt, setLoadRetryAttempt] = useState(0)
   const [rewriteParagraph, setRewriteParagraph] = useState<StoredParagraph>()
   const [rewriteOpen, setRewriteOpen] = useState(false)
   const rewriteTriggerRef = useRef<HTMLButtonElement | null>(null)
@@ -332,11 +343,27 @@ function FeedbackProse({ message, onRewriteParagraph, onApplyRewrite, onProseEva
 
   useEffect(() => {
     let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
     void listMessageParagraphsWithCurrentStyleIssues(message.projectId, message.id).then((rows) => {
-      if (!cancelled) { setStoredParagraphs(rows.sort((left, right) => left.index - right.index)); rows.forEach((paragraph) => onProseEvaluation?.({ type: 'analyzed', message, paragraph })) }
-    }).catch(() => undefined)
-    return () => { cancelled = true }
-  }, [message])
+      if (cancelled) return
+      setStoredParagraphs(rows.sort((left, right) => left.index - right.index))
+      // Evaluation telemetry is best-effort; it must never look like a load
+      // failure and trigger another fetch of the same rows.
+      try { rows.forEach((paragraph) => onProseEvaluation?.({ type: 'analyzed', message, paragraph })) } catch { /* ignore */ }
+    }).catch((cause: unknown) => {
+      // A swallowed failure here blanks every 可优化 trigger for the whole
+      // chapter and, before the bounded retry below, never recovered until an
+      // unrelated workspace refresh happened to remount this effect.
+      console.warn('[prose-paragraphs] 段落检测结果加载失败，将自动重试', cause)
+      if (!cancelled && loadRetryAttempt + 1 < PROSE_PARAGRAPH_LOAD_MAX_RETRIES) {
+        retryTimer = setTimeout(() => setLoadRetryAttempt((value) => value + 1), PROSE_PARAGRAPH_LOAD_RETRY_MS)
+      }
+    })
+    return () => {
+      cancelled = true
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
+    }
+  }, [message, loadRetryAttempt])
 
   // A candidate arriving from a completed regeneration is intentionally only
   // a new affordance. It must not open a comparison sheet by itself. Reset the
@@ -349,7 +376,7 @@ function FeedbackProse({ message, onRewriteParagraph, onApplyRewrite, onProseEva
 
   function openPanel(verdict: FeedbackVerdict) {
     setSelectedVerdict(verdict)
-    setPanelOpen(true)
+    setActivePanel('feedback')
     void refreshFeedback()
   }
 
@@ -421,6 +448,13 @@ function FeedbackProse({ message, onRewriteParagraph, onApplyRewrite, onProseEva
           title="点踩这条正文"
           onClick={() => openPanel('down')}
         ><ThumbsDown size={15} aria-hidden="true" />点踩</button>
+        <button
+          className="feedback-trigger"
+          type="button"
+          aria-label="标记仍有 AI 味的段落"
+          title="标记仍有 AI 味的段落"
+          onClick={() => setActivePanel('flavor')}
+        ><Flag size={15} aria-hidden="true" />标 AI 味</button>
         {canRegenerate && onRegenerateProse && (
           <button
             ref={writingCandidate ? candidateTriggerRef : undefined}
@@ -436,19 +470,20 @@ function FeedbackProse({ message, onRewriteParagraph, onApplyRewrite, onProseEva
         )}
       </div>
       {writingCandidate && <WritingCandidatePanel open={candidateOpen} message={message} candidate={writingCandidate} onClose={requestCloseCandidate} onExited={finishCloseCandidate} onKeepOriginal={onKeepOriginalProse} onAdoptCandidate={onAdoptCandidateProse} writingBusy={writingBusy} />}
-      {panelOpen && (
+      {activePanel === 'feedback' && (
         <FeedbackPanel
           message={message}
           feedback={feedback}
           loading={loading}
           error={error}
           initialVerdict={selectedVerdict}
-          onClose={() => setPanelOpen(false)}
+          onClose={() => setActivePanel(null)}
           onSaved={setFeedback}
           refreshFeedback={refreshFeedback}
           onAnalyzeFeedbackPreference={onAnalyzeFeedbackPreference}
         />
       )}
+      {activePanel === 'flavor' && <MissedFlavorPanel message={message} onClose={() => setActivePanel(null)} />}
       {rewriteParagraph && <RewritePanel open={rewriteOpen} message={message} paragraph={rewriteParagraph} onClose={requestCloseRewrite} onExited={finishCloseRewrite} onRewrite={onRewriteParagraph} onApply={async (rewrittenText) => { await onApplyRewrite?.({ message, paragraph: rewriteParagraph, rewrittenText }); setRewriteOpen(false); rewriteCloseRequestedRef.current = true }} />}
     </article>
   )
@@ -595,6 +630,163 @@ function RewritePanel({ open, message, paragraph, onClose, onExited, onRewrite, 
   )
 
   return createPortal(panel, document.querySelector('.story-stage') ?? document.querySelector('.app-shell') ?? document.body)
+}
+
+/**
+ * Multi-select paragraph list shared by the feedback and missed-flavor panels.
+ * Each row pairs a selection target with an independent expand toggle so the
+ * full prose can be reviewed before committing — the truncated preview alone
+ * is not enough to judge a paragraph.
+ */
+function ParagraphPickList({ paragraphs, selectedIndexes, reportedIndexes = [], onToggle, onUnreport }: { paragraphs: ParagraphAnchor[]; selectedIndexes: readonly number[]; reportedIndexes?: readonly number[]; onToggle: (index: number) => void; onUnreport?: (index: number) => void }) {
+  const [expandedIndexes, setExpandedIndexes] = useState<ReadonlySet<number>>(new Set())
+  const toggleExpanded = (index: number) => setExpandedIndexes((current) => {
+    const next = new Set(current)
+    if (next.has(index)) next.delete(index)
+    else next.add(index)
+    return next
+  })
+  return (
+    <div className="feedback-paragraphs" role="listbox" aria-label="选择段落">
+      {paragraphs.map((paragraph) => {
+        const selected = selectedIndexes.includes(paragraph.index)
+        const reported = reportedIndexes.includes(paragraph.index)
+        const expanded = expandedIndexes.has(paragraph.index)
+        return (
+          <div key={paragraph.id} className={`feedback-paragraph-item${selected ? ' is-selected' : ''}${reported ? ' is-reported' : ''}`}>
+            <div className="feedback-paragraph-row">
+              <button type="button" role="option" aria-selected={selected} disabled={reported} onClick={() => onToggle(paragraph.index)}>
+                <span>第 {paragraph.index + 1} 段{reported ? '·已记下' : ''}</span>
+                <small>{paragraph.text.slice(0, 44)}{paragraph.text.length > 44 ? '…' : ''}</small>
+              </button>
+              {!reported && (
+                <button type="button" className="feedback-paragraph-expand" aria-expanded={expanded} aria-label={`展开第 ${paragraph.index + 1} 段全文`} onClick={() => toggleExpanded(paragraph.index)}>
+                  <ChevronDown size={14} className={`feedback-paragraph-chevron${expanded ? ' is-open' : ''}`} />
+                </button>
+              )}
+              {reported && onUnreport && (
+                <button type="button" className="feedback-paragraph-expand" aria-label={`撤销第 ${paragraph.index + 1} 段的标记`} title="撤销标记" onClick={() => onUnreport(paragraph.index)}>
+                  <RotateCcw size={14} />
+                </button>
+              )}
+            </div>
+            <div className={`feedback-paragraph-fulltext-wrap${expanded ? ' open' : ''}`} aria-hidden={!expanded}>
+              <p className="feedback-paragraph-fulltext">{paragraph.text}</p>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function MissedFlavorPanel({ message, onClose }: { message: ConversationMessage; onClose: () => void }) {
+  const [paragraphs, setParagraphs] = useState<ParagraphAnchor[]>([])
+  const [selectedIndexes, setSelectedIndexes] = useState<number[]>([])
+  const [reportedIds, setReportedIds] = useState<ReadonlySet<string>>(new Set())
+  const [saving, setSaving] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [saveError, setSaveError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const texts = Array.isArray(message.paragraphs) ? message.paragraphs : []
+      try {
+        const stored = await storyDatabase.paragraphs.where('[projectId+messageId]').equals([message.projectId, message.id]).toArray()
+        const anchors = texts.map((text, index) => {
+          const fingerprint = createParagraphFingerprint(text)
+          const persisted = stored.find((row: StoredParagraph) => (
+            row.projectId === message.projectId
+              && row.messageId === message.id
+              && row.chapterId === message.chapterId
+              && row.index === index
+              && row.text === text
+              && row.fingerprint === fingerprint
+          ))
+          return { id: persisted?.id ?? `paragraph-message-${message.id}-${index}`, index, text, fingerprint }
+        })
+        if (!cancelled) setParagraphs(anchors)
+      } catch {
+        if (!cancelled) setParagraphs(texts.map((text, index) => ({ id: `paragraph-message-${message.id}-${index}`, index, text, fingerprint: createParagraphFingerprint(text) })))
+      }
+      try {
+        const reports = await listMissedFlavorReports()
+        if (!cancelled) setReportedIds(new Set(reports.filter((item) => item.messageId === message.id).map((item) => item.paragraphId)))
+      } catch { /* a failed lookup only loses the "already flagged" badges */ }
+    })()
+    return () => { cancelled = true }
+  }, [message])
+
+  async function unreport(index: number) {
+    const anchor = paragraphs.find((item) => item.index === index)
+    if (!anchor) return
+    try {
+      await deleteMissedFlavorReport(anchor.id)
+      setReportedIds((current) => {
+        const next = new Set(current)
+        next.delete(anchor.id)
+        return next
+      })
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause.message : '撤销失败，请稍后重试')
+    }
+  }
+
+  async function submit() {
+    const anchors = selectedIndexes
+      .map((index) => paragraphs.find((item) => item.index === index))
+      .filter((item): item is ParagraphAnchor => Boolean(item) && !reportedIds.has(item!.id))
+    if (!anchors.length) {
+      setSaveError('请选择至少一个未标记过的段落')
+      return
+    }
+    setSaving(true)
+    setSaveError('')
+    try {
+      for (const anchor of anchors) {
+        const inserted = await saveMissedFlavorReport({ projectId: message.projectId, messageId: message.id, paragraphId: anchor.id, text: anchor.text })
+        if (inserted) setReportedIds((current) => new Set(current).add(anchor.id))
+      }
+      onClose()
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause.message : '标记保存失败，请稍后重试')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function exportReports() {
+    setExporting(true)
+    setSaveError('')
+    try {
+      const reports = await listMissedFlavorReports()
+      if (!reports.length) {
+        setSaveError('还没有任何标记记录')
+        return
+      }
+      const content = JSON.stringify({ exportedAt: new Date().toISOString(), count: reports.length, reports }, null, 2)
+      await saveEvaluationReport(`叙影-AI味标记-${new Date().toISOString().slice(0, 10)}.json`, content, 'json')
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause.message : '导出失败，请稍后重试')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  return (
+    <div className="feedback-panel" role="dialog" aria-label="标记 AI 味段落" aria-modal="false">
+      <div className="feedback-panel-header"><strong>哪几段仍有 AI 味？</strong><button type="button" className="feedback-close" aria-label="关闭标记面板" title="关闭" onClick={onClose}><X size={16} /></button></div>
+      <p className="feedback-hint">这些记录只保存在本机，用于改进检测，不会改动正文。点箭头可展开段落全文；已记下的段落可撤销。</p>
+      <ParagraphPickList paragraphs={paragraphs} selectedIndexes={selectedIndexes} reportedIndexes={[...reportedIds].map((id) => paragraphs.find((item) => item.id === id)?.index ?? -1)} onToggle={(index) => setSelectedIndexes((current) => current.includes(index) ? current.filter((item) => item !== index) : [...current, index].sort((a, b) => a - b))} onUnreport={(index) => void unreport(index)} />
+      {saveError && <p className="feedback-error" role="alert">{saveError}</p>}
+      <div className="feedback-panel-actions">
+        <button type="button" disabled={exporting} onClick={() => void exportReports()}>{exporting ? '导出中…' : '导出全部记录'}</button>
+        <button type="button" onClick={onClose}>取消</button>
+        <button type="button" className="primary" disabled={saving || selectedIndexes.length === 0} onClick={() => void submit()}>{saving ? '保存中…' : `记下${selectedIndexes.length ? ` ${selectedIndexes.length} 段` : ''}`}</button>
+      </div>
+    </div>
+  )
 }
 
 function FeedbackPanel({
@@ -744,12 +936,7 @@ function FeedbackPanel({
         <label><input type="radio" checked={scope === 'message'} onChange={() => { setScope('message'); setParagraphIndexes([]) }} />整条正文</label>
         <label><input type="radio" checked={scope === 'paragraph'} onChange={() => setScope('paragraph')} />仅针对某段</label>
       </div>
-      {scope === 'paragraph' && <div className="feedback-paragraphs" role="listbox" aria-label="选择段落">
-        {paragraphs.map((paragraph) => {
-          const selected = paragraphIndexes.includes(paragraph.index)
-          return <button key={paragraph.id} type="button" role="option" aria-selected={selected} className={selected ? 'selected' : ''} onClick={() => setParagraphIndexes((current) => selected ? current.filter((index) => index !== paragraph.index) : [...current, paragraph.index].sort((a, b) => a - b))}><span>第 {paragraph.index + 1} 段</span><small>{paragraph.text.slice(0, 44)}{paragraph.text.length > 44 ? '…' : ''}</small></button>
-        })}
-      </div>}
+      {scope === 'paragraph' && <ParagraphPickList paragraphs={paragraphs} selectedIndexes={paragraphIndexes} onToggle={(index) => setParagraphIndexes((current) => current.includes(index) ? current.filter((item) => item !== index) : [...current, index].sort((a, b) => a - b))} />}
       <div className="feedback-reasons"><span>{verdict === 'up' ? '喜欢原因' : '点踩原因'}（可选）</span><div>{['剧情方向', '人物塑造', '节奏', '语言表达', '其他'].map((item) => <button key={item} type="button" className={reason === item ? 'selected' : ''} onClick={() => setReason(reason === item ? '' : item)}>{item}</button>)}</div></div>
       <label className="feedback-note">补充说明（可选）<textarea value={customNote} onChange={(event) => setCustomNote(event.target.value)} rows={2} placeholder="告诉我们更多想法…" /></label>
       {!customNote.trim() && <p className="feedback-hint">提交后会调用 1 次文本模型分析写作偏好，可能产生费用；失败不会自动重试，原始反馈仍会保留。</p>}

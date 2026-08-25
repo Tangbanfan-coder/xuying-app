@@ -1,4 +1,4 @@
-import 'fake-indexeddb/auto'
+﻿import 'fake-indexeddb/auto'
 import Dexie from 'dexie'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Chapter, ConversationMessage, FeedbackTargetInput, ProseStyleIssue, StoryProject, SummaryVersion, UpsertFeedbackInput, WritingProseResult, WritingSceneNotes, WritingTurnResult } from '../domain/models'
@@ -532,7 +532,7 @@ describe('StoryDatabase v5-v6 summary version and feedback schema migrations', (
       upgraded = new StoryDatabase(name)
       await upgraded.open()
 
-      expect(upgraded.verno).toBe(15)
+      expect(upgraded.verno).toBe(16)
       expect(await upgraded.feedback.count()).toBe(0)
       const versions = await upgraded.summaryVersions.where('projectId').equals('project-v4').toArray()
       const migrated = versions.find((version) => version.chapterId === summarizedChapter.id)
@@ -630,7 +630,7 @@ describe('StoryDatabase v15 chapter title sanitization migration', () => {
       upgraded = new StoryDatabase(name)
       await upgraded.open()
 
-      expect(upgraded.verno).toBe(15)
+      expect(upgraded.verno).toBe(16)
       expect(await upgraded.chapters.get(pollutedChapter.id)).toMatchObject({ title: '初到雾港' })
       expect(await upgraded.chapters.get(gluedChapter.id)).toMatchObject({ title: '雨夜追踪' })
       expect(await upgraded.chapters.get(purePrefixChapter.id)).toMatchObject({ title: '' })

@@ -1,10 +1,19 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ProviderSettings } from '../providers/types'
+import type { ContextBudgetPlan } from '../providers/writing'
 import SettingsDrawer from './SettingsDrawer'
+
+const capacitorAppMocks = vi.hoisted(() => ({
+  addListener: vi.fn((_eventName: string, handler: () => void) => Promise.resolve({ remove: async () => {} })),
+}))
+
+vi.mock('@capacitor/app', () => ({
+  App: { addListener: capacitorAppMocks.addListener },
+}))
 
 const providerSettings: ProviderSettings = {
   text: {
@@ -75,9 +84,9 @@ describe('SettingsDrawer', () => {
     expect(screen.getByRole('heading', { name: '设置' })).toBeDefined()
     expect(screen.getByRole('button', { name: /写作/ })).toBeDefined()
     expect(screen.getByRole('button', { name: /记忆与上下文/ })).toBeDefined()
-    expect(screen.getByRole('button', { name: /外观/ })).toBeDefined()
+    expect(screen.getByRole('button', { name: /作品风格/ })).toBeDefined()
     expect(screen.getByRole('button', { name: /模型服务/ })).toBeDefined()
-    expect(screen.getByRole('radiogroup', { name: '界面外观' })).toBeDefined()
+    expect(screen.getByRole('radiogroup', { name: '深浅模式' })).toBeDefined()
     expect(screen.queryByRole('button', { name: /中性纸墨/ })).toBeNull()
     expect(screen.queryByRole('button', { name: /摘要版本历史/ })).toBeNull()
   })
@@ -91,7 +100,7 @@ describe('SettingsDrawer', () => {
     // 页面切换带 160ms 退出动画，需等页面重挂载完成
     await waitForPageSettled('记忆与上下文')
     expect(screen.getByRole('heading', { name: '记忆与上下文' })).toBeDefined()
-    expect(screen.getByText('上下文与记忆')).toBeDefined()
+    expect(screen.getByText('剧情记忆长度')).toBeDefined()
     await user.click(screen.getByRole('button', { name: /摘要版本历史/ }))
     expect(onOpenSummaryHistory).toHaveBeenCalledTimes(1)
   })
@@ -110,7 +119,7 @@ describe('SettingsDrawer', () => {
     await user.click(screen.getByRole('button', { name: /写作/ }))
     await waitForPageSettled('写作')
 
-    const globalHeading = await screen.findByRole('heading', { name: '全局创作设定' })
+    const globalHeading = await screen.findByRole('heading', { name: '作用于所有作品' })
     const globalSection = globalHeading.closest('section')
     const toolsHeading = await screen.findByRole('heading', { name: '创作辅助' })
     const toolsSection = toolsHeading.closest('section')
@@ -172,10 +181,27 @@ describe('SettingsDrawer', () => {
     const user = userEvent.setup()
     renderDrawer()
 
-    await user.click(screen.getByRole('button', { name: /外观/ }))
-    await waitForPageSettled('外观')
+    await user.click(screen.getByRole('button', { name: /作品风格/ }))
+    await waitForPageSettled('作品风格')
     expect(screen.getByRole('heading', { name: '作品氛围' })).toBeDefined()
     expect(screen.getByRole('button', { name: /中性纸墨/ })).toBeDefined()
+  })
+
+  it('shows token-based memory hints derived from the usage plan', async () => {
+    const user = userEvent.setup()
+    const plan = {
+      contextBudget: 'standard',
+      contextCapacityTokens: 100_000,
+      contextNarrowingFactor: 0.92,
+    } as ContextBudgetPlan
+    renderDrawer({ contextUsagePlan: plan })
+
+    await user.click(screen.getByRole('button', { name: /记忆与上下文/ }))
+    await waitForPageSettled('记忆与上下文')
+
+    expect(screen.getByText('约 50.6k 剧情记忆')).toBeDefined()
+    expect(screen.getByText('约 69k 剧情记忆')).toBeDefined()
+    expect(screen.getByText('约 87.4k 剧情记忆')).toBeDefined()
   })
 
   it('returns to the active category after an external settings page closes', async () => {
@@ -201,14 +227,13 @@ describe('SettingsDrawer', () => {
     renderDrawer({ onOpenProviderSettings })
 
     await user.click(screen.getByRole('button', { name: /模型服务/ }))
-    await screen.findByRole('heading', { name: '模型服务', level: 3 })
-    await waitFor(() => expect(document.querySelector('.settings-content--exiting')).toBeNull())
-    await user.click(screen.getByRole('button', { name: /^图片模型/ }))
+    await waitForProvidersPage()
+    await user.click(screen.getByRole('button', { name: '打开图片模型设置' }))
     expect(onOpenProviderSettings).toHaveBeenCalledWith('image')
   })
 
   async function waitForProvidersPage() {
-    await screen.findByRole('heading', { name: '模型服务', level: 3 })
+    await screen.findByRole('heading', { name: '文本模型', level: 3 })
     await waitFor(() => expect(document.querySelector('.settings-content--exiting')).toBeNull())
   }
 
@@ -223,10 +248,31 @@ describe('SettingsDrawer', () => {
 
     await user.click(screen.getByRole('button', { name: /^模型服务/ }))
     await waitForProvidersPage()
-    await user.click(screen.getByRole('button', { name: /文本模型 · 文本服务/ }))
+    await user.click(screen.getByRole('button', { name: /文本服务 · 点击切换常用模型/ }))
     await user.click(screen.getByRole('option', { name: /alt-model/ }))
 
     expect(onSwitchProviderModel).toHaveBeenCalledWith('text', 'alt-model')
+  })
+
+  it('switches the active text provider from the quick select on the model service page', async () => {
+    const user = userEvent.setup()
+    const onSwitchSlotProvider = vi.fn()
+    const altProvider = { ...providerSettings.text, id: 'alt-text-provider', name: '备用文本服务', model: 'alt-model' }
+    const withProviders: ProviderSettings = {
+      ...providerSettings,
+      textProviders: [providerSettings.text, altProvider],
+    }
+    renderDrawer({ providerSettings: withProviders, onSwitchSlotProvider })
+
+    await user.click(screen.getByRole('button', { name: /^模型服务/ }))
+    await waitForProvidersPage()
+    await user.click(screen.getByRole('button', { name: /test-model · 点击切换供应商/ }))
+
+    const sheetBody = document.querySelector('.settings-sheet-body')
+    expect(within(sheetBody as HTMLElement).getAllByRole('option')).toHaveLength(2)
+    await user.click(within(sheetBody as HTMLElement).getByRole('option', { name: /备用文本服务/ }))
+
+    expect(onSwitchSlotProvider).toHaveBeenCalledWith('text', 'alt-text-provider')
   })
 
   it('shows an empty hint in the quick select when no models are saved', async () => {
@@ -249,9 +295,9 @@ describe('SettingsDrawer', () => {
     const onClose = vi.fn()
     renderDrawer({ onClose })
 
-    await user.click(screen.getByRole('button', { name: /外观/ }))
-    await waitForPageSettled('外观')
-    expect(screen.getByRole('heading', { name: '外观' })).toBeDefined()
+    await user.click(screen.getByRole('button', { name: /作品风格/ }))
+    await waitForPageSettled('作品风格')
+    expect(screen.getByRole('heading', { name: '作品风格' })).toBeDefined()
     await user.keyboard('{Escape}')
     await waitForPageSettled('设置')
     expect(screen.getByRole('heading', { name: '设置' })).toBeDefined()
@@ -268,5 +314,61 @@ describe('SettingsDrawer', () => {
     expect(screen.getByRole('dialog', { hidden: true }).getAttribute('data-suspended')).toBe('true')
     await user.keyboard('{Escape}')
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('opens selection options in a bottom sheet and Escape only closes the sheet', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    renderDrawer({ onClose })
+
+    await user.click(screen.getByRole('button', { name: /作品风格/ }))
+    await waitForPageSettled('作品风格')
+    await user.click(screen.getByRole('button', { name: /中性纸墨/ }))
+
+    const sheetBody = document.querySelector('.settings-sheet-body')
+    expect(sheetBody?.getAttribute('role')).toBe('listbox')
+    expect(within(sheetBody as HTMLElement).getByRole('option', { name: /中性纸墨/ })).toBeDefined()
+
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(document.querySelector('.settings-sheet-body')).toBeNull())
+    expect(screen.getByRole('heading', { name: '作品风格' })).toBeDefined()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('shows the back arrow only on subpages and the close button only on home', async () => {
+    const user = userEvent.setup()
+    renderDrawer()
+
+    expect(screen.queryByRole('button', { name: '返回设置' })).toBeNull()
+    expect(screen.getByRole('button', { name: '关闭设置' })).toBeDefined()
+
+    await user.click(screen.getByRole('button', { name: /写作/ }))
+    await waitForPageSettled('写作')
+
+    expect(screen.getByRole('button', { name: '返回设置' })).toBeDefined()
+    expect(screen.queryByRole('button', { name: '关闭设置' })).toBeNull()
+  })
+
+  it('navigates one level per Android back press and animates backwards', async () => {
+    const onClose = vi.fn()
+    const handlers: Array<() => void> = []
+    capacitorAppMocks.addListener.mockImplementation((_event, handler) => {
+      handlers.push(handler as () => void)
+      return Promise.resolve({ remove: async () => {} })
+    })
+    renderDrawer({ onClose })
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /写作/ }))
+    await waitForPageSettled('写作')
+
+    act(() => { handlers[handlers.length - 1]?.() })
+    await waitForPageSettled('设置')
+    expect(screen.getByRole('heading', { name: '设置' })).toBeDefined()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(document.querySelector('.settings-content')?.getAttribute('data-direction')).toBe('back')
+
+    act(() => { handlers[handlers.length - 1]?.() })
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 })

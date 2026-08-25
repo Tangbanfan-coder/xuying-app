@@ -119,7 +119,7 @@ describe('ProviderSettingsDialog layering', () => {
     fireEvent.click(screen.getByRole('button', { name: /模型服务/ }))
     // SettingsDrawer 页面切换带 160ms 退出动画，等页面重挂载完成后再进入
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '返回设置' })))
-    fireEvent.click(screen.getByRole('button', { name: /^文本模型/ }))
+    fireEvent.click(screen.getByRole('button', { name: '打开文本模型设置' }))
     await screen.findByRole('dialog', { name: '模型接口' })
 
     const settingsDrawer = container.querySelector('.settings-drawer')
@@ -625,6 +625,30 @@ describe('ProviderSettingsDialog saved models', () => {
     expect(manualWindowValue()).toBe('')
   })
 
+  it('keeps a key typed before the async secret restore completes', async () => {
+    let resolveRestore: (value: string | null) => void = () => undefined
+    secretStoreMocks.get.mockImplementationOnce(() => new Promise((resolve) => { resolveRestore = resolve }))
+    listOpenAiModelsMock.mockResolvedValue({
+      baseUrl: 'https://api.test/v1',
+      models: [{ id: 'gpt-4o', ownedBy: 'openai' }],
+    })
+    const fetchedSettings: ProviderSettings = {
+      ...settings,
+      text: { ...settings.text, baseUrl: 'https://api.test/v1' },
+      textProviders: [{ ...settings.text, baseUrl: 'https://api.test/v1' }],
+    }
+    render(<ProviderSettingsDialog open settings={fetchedSettings} onClose={vi.fn()} onSave={vi.fn()} />)
+
+    const user = userEvent.setup()
+    // 在异步恢复完成前后夹住用户输入，复现"恢复覆盖输入"的竞态窗口
+    await user.type(screen.getByLabelText('API Key'), 'sk-late')
+    resolveRestore('sk-stored')
+
+    await user.click(screen.getByRole('button', { name: /获取模型列表/ }))
+    expect(await screen.findByText(/已获取 1 个模型/)).toBeDefined()
+    expect((screen.getByLabelText('API Key') as HTMLInputElement).value).toBe('sk-late')
+  })
+
   it('collects multiple fetched models via add buttons and persists them on save', async () => {
     const user = userEvent.setup()
     listOpenAiModelsMock.mockResolvedValue({
@@ -643,7 +667,8 @@ describe('ProviderSettingsDialog saved models', () => {
     const onSave = vi.fn()
     render(<ProviderSettingsDialog open settings={fetchedSettings} onClose={vi.fn()} onSave={onSave} />)
 
-    await user.type(screen.getByLabelText('API Key'), 'sk-test')
+    // 与下方"编辑手动窗口"同理：user.type 偶发不写入，密钥只关心最终值，直接确定性赋值
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-test' } })
     await user.click(screen.getByRole('button', { name: /获取模型列表/ }))
     await screen.findByText(/已获取 3 个模型/)
     const list = screen.getByRole('listbox', { name: '模型列表' })
@@ -664,13 +689,13 @@ describe('ProviderSettingsDialog saved models', () => {
   })
 
   it('editing the manual window of the active model syncs into its saved entry', async () => {
-    const user = userEvent.setup()
     const onSave = renderSavedDialog()
 
     await screen.findByRole('region', { name: '我的模型' })
-    await user.type(screen.getByLabelText(/^上下文窗口/), '5')
+    // user.type 在文件内顺序执行时偶发不写入（jsdom 焦点时序），改用确定性赋值
+    fireEvent.change(screen.getByLabelText(/^上下文窗口/), { target: { value: '1115' } })
 
-    await user.click(screen.getByRole('button', { name: '保存配置' }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '保存配置' }))
     await waitFor(() => expect(onSave).toHaveBeenCalled())
     expect(onSave.mock.calls[0][0].text.savedModels[0]).toMatchObject({ id: 'model-a', manualContextLength: 1115 })
   })

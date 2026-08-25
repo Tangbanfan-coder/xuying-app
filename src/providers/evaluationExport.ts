@@ -106,6 +106,12 @@ export function evaluationReportCsv(report: ReturnType<typeof buildEvaluationRep
 function base64Utf8(value: string) { const bytes = new TextEncoder().encode(value); let binary = ''; bytes.forEach((byte) => { binary += String.fromCharCode(byte) }); return btoa(binary) }
 export async function saveEvaluationReport(fileName: string, content: string, format: EvaluationExportFormat) {
   const contentType = format === 'json' ? 'application/json' : 'text/csv'
-  if (Capacitor.isNativePlatform()) { await FileSharer.save({ base64Data: `data:${contentType};base64,${base64Utf8(content)}`, filename: fileName, contentType, android: { saveDirectory: 'documents', relativePath: '叙影' } }); return }
+  if (Capacitor.isNativePlatform()) {
+    // share() writes to app-private cache and hands a FileProvider URI to the
+    // system share sheet: no storage permission on any Android version. save()
+    // would hit legacy external storage below Android 10 and fail ungranted.
+    await FileSharer.share({ base64Data: `data:${contentType};base64,${base64Utf8(content)}`, filename: fileName, contentType, title: fileName })
+    return
+  }
   const url = URL.createObjectURL(new Blob([content], { type: `${contentType};charset=utf-8` })); const link = document.createElement('a'); link.href = url; link.download = fileName; link.click(); URL.revokeObjectURL(url)
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { Check, ChevronDown, Eye, EyeOff, LoaderCircle, PlugZap, Plus, Save, Search, Trash2, X } from 'lucide-react'
-import { createProviderConfig, savedModelPatch, syncActiveModelIntoSaved } from '../providers/config'
+import { createProviderConfig, providerListKey as listKey, providersFor, savedModelPatch, syncActiveModelIntoSaved } from '../providers/config'
 import { browserTransport } from '../providers/browserTransport'
 import { listOpenAiModels } from '../providers/openAiCompatible'
 import { isModelKnown, lookupModelLimit, withModelMetadata } from '../providers/modelLimits'
@@ -27,12 +27,6 @@ type TestState =
   | { status: 'loading' }
   | { status: 'success'; message: string }
   | { status: 'error'; message: string }
-
-type ProviderListKey = 'textProviders' | 'imageProviders'
-
-function listKey(slot: ProviderSlot): ProviderListKey {
-  return slot === 'text' ? 'textProviders' : 'imageProviders'
-}
 
 const COMPATIBILITY_PRESETS: ReadonlyArray<readonly [CompatibilityPreset, string]> = [
   ['automatic', '自动兼容'],
@@ -97,11 +91,6 @@ function parseSizeList(value: string): string[] | undefined {
   return sizes.length ? Array.from(new Set(sizes)) : undefined
 }
 
-function providersFor(settings: ProviderSettings, slot: ProviderSlot) {
-  const list = settings[listKey(slot)]
-  return list?.length ? list : [settings[slot]]
-}
-
 function validateBaseUrl(value: string, required = false) {
   const trimmed = value.trim()
   if (!trimmed) return required ? '请先填写服务地址' : null
@@ -153,7 +142,14 @@ export default function ProviderSettingsDialog({ open, nested = false, settings,
     void Promise.all(uniqueProviders.map(async (provider) => [provider.secretRef, await secretStore.get(provider.secretRef)] as const)).then((entries) => {
       if (cancelled) return
       const keys = Object.fromEntries(entries.map(([ref, key]) => [ref, key ?? '']))
-      setApiKeys(keys)
+      // 恢复期间用户可能已开始输入；合并时保留非空输入，避免异步恢复覆盖用户正在编辑的 Key
+      setApiKeys((value) => {
+        const merged = { ...keys }
+        for (const [ref, val] of Object.entries(value)) {
+          if (val.trim()) merged[ref] = val
+        }
+        return merged
+      })
       setBaselineApiKeys(keys)
       window.requestAnimationFrame(() => closeButtonRef.current?.focus())
     })

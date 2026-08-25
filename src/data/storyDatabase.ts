@@ -18,6 +18,7 @@ import type {
   IllustrationStylePresetId,
   IllustrationAsset,
   IllustrationMode,
+  MissedFlavorReport,
   ProjectStyle,
   ProseEvaluationEvent,
   ProjectWorkspace,
@@ -43,7 +44,7 @@ import { materializeWritingSceneNotes, reconcileForeshadowing } from '../domain/
 import { createParagraphFingerprint, hasWritingContentOverlap, hashText as hashTextImpl, normalizeText as normalizeParagraphText } from '../domain/paragraphs'
 import { stripChapterOrderPrefixes } from '../domain/chapterTitle'
 import { loadGlobalWritingInstructions } from '../providers/config'
-import { detectProseStyleIssues, mergeProseStyleIssues, PROSE_STYLE_RULE_VERSION } from '../domain/proseStyle'
+import { detectProseStyleIssues, MAX_PROSE_ANALYSIS_PARAGRAPHS, mergeProseStyleIssues, PROSE_STYLE_RULE_VERSION } from '../domain/proseStyle'
 
 export { hashText, normalizeText } from '../domain/paragraphs'
 
@@ -66,6 +67,7 @@ export class StoryDatabase extends Dexie {
   styleCorpusFragments!: Table<StyleCorpusFragment, string>
   styleCorpusBindings!: Table<StyleCorpusBinding, string>
   evaluationEvents!: Table<ProseEvaluationEvent, string>
+  missedFlavorReports!: Table<MissedFlavorReport, string>
 
   constructor(databaseName = STORY_DATABASE_NAME) {
     super(databaseName)
@@ -259,6 +261,13 @@ export class StoryDatabase extends Dexie {
       .upgrade(async (transaction) => {
         await sanitizeChapterTitlesFromV14(transaction)
       })
+    // Reader-flagged missed "AI flavor" paragraphs keep their full prose text
+    // locally as future training labels; the table is deliberately absent from
+    // the anonymous evaluation telemetry export.
+    this.version(16).stores({
+      projects: 'id, updatedAt, lastOpenedAt', messages: 'id, projectId, [projectId+order], createdAt, backgroundTaskId, turnId',
+      chapters: 'id, projectId, [projectId+order], updatedAt', characters: 'id, projectId, [projectId+createdAt], status', illustrations: 'id, projectId, [projectId+createdAt], status, turnId', styles: 'id, &projectId, updatedAt', scenes: 'id, projectId, [projectId+order], createdAt, turnId', paragraphs: 'id, projectId, sourceType, [projectId+sourceType], [projectId+chapterId], [projectId+messageId], fingerprint, createdAt', summaryVersions: 'id, projectId, chapterId, [projectId+chapterId], &[projectId+chapterId+version], createdAt', feedback: 'id, projectId, messageId, [projectId+messageId], &targetKey, [projectId+updatedAt], updatedAt', preferenceSignals: 'id, projectId, feedbackId, fingerprint, [projectId+updatedAt], updatedAt', writingCandidates: 'id, projectId, turnId, proseMessageId, [projectId+turnId], [projectId+updatedAt], updatedAt', styleCorpusSources: 'id, &fingerprint, createdAt, updatedAt', styleCorpusFragments: 'id, sourceId, fingerprint, confirmed, usageCount, updatedAt', styleCorpusBindings: 'id, fragmentId, scope, projectId, state, [scope+state], [projectId+state], updatedAt', evaluationEvents: 'id, eventType, occurredAt, projectId, [projectId+occurredAt]', missedFlavorReports: 'id, paragraphId, projectId, createdAt',
+    })
   }
 }
 
@@ -771,7 +780,7 @@ export async function saveModelProseAnalysis(input: {
   if (!Array.isArray(input.paragraphs) || !Array.isArray(input.issuesByParagraph) || input.paragraphs.length !== input.issuesByParagraph.length) {
     throw new Error('文风分析段落数量已过期')
   }
-  if (input.paragraphs.length > 24) throw new Error('一次文风分析最多支持 24 段')
+  if (input.paragraphs.length > MAX_PROSE_ANALYSIS_PARAGRAPHS) throw new Error(`一次正文风检最多支持 ${MAX_PROSE_ANALYSIS_PARAGRAPHS} 段`)
   input.paragraphs.forEach((text) => {
     if (typeof text !== 'string' || !text.trim() || text.length > 50_000) throw new Error('文风分析段落内容无效')
   })
@@ -838,6 +847,43 @@ export async function saveModelProseAnalysis(input: {
     if (updates.length) await storyDatabase.paragraphs.bulkPut(updates)
     return updates
   })
+}
+
+/**
+ * Persists a reader-flagged "still reads like AI" paragraph with its full
+ * text. One row per paragraph id: a repeat flag is a no-op so the label set
+ * never duplicates. These rows intentionally stay outside the anonymous
+ * telemetry pipeline because they contain prose.
+ */
+export async function saveMissedFlavorReport(input: { projectId: string; messageId?: string; paragraphId: string; text: string }) {
+  if (!input || typeof input.projectId !== 'string' || !input.projectId.trim()) throw new Error('漏检上报缺少作品标识')
+  if (typeof input.paragraphId !== 'string' || !input.paragraphId.trim()) throw new Error('漏检上报缺少段落标识')
+  if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 50_000) throw new Error('漏检上报段落内容无效')
+  const existing = await storyDatabase.missedFlavorReports.where('paragraphId').equals(input.paragraphId).first()
+  if (existing) return false
+  const report: MissedFlavorReport = {
+    id: crypto.randomUUID(),
+    projectId: input.projectId,
+    ...(input.messageId ? { messageId: input.messageId } : {}),
+    paragraphId: input.paragraphId,
+    text: input.text,
+    createdAt: Date.now(),
+  }
+  await storyDatabase.missedFlavorReports.add(report)
+  return true
+}
+
+export function listMissedFlavorReports() {
+  return storyDatabase.missedFlavorReports.orderBy('createdAt').reverse().toArray()
+}
+
+export async function deleteMissedFlavorReport(paragraphId: string) {
+  if (typeof paragraphId !== 'string' || !paragraphId.trim()) throw new Error('漏检上报缺少段落标识')
+  await storyDatabase.missedFlavorReports.where('paragraphId').equals(paragraphId).delete()
+}
+
+export function missedFlavorReportCount() {
+  return storyDatabase.missedFlavorReports.count()
 }
 
 function splitChapterContent(content: string) {

@@ -90,7 +90,7 @@ function scheduleModelProseAnalysis(
   refreshWorkspace: (projectId: string) => Promise<ProjectWorkspace | null | undefined>,
   showToast: (text: string, kind?: 'success' | 'error') => void,
 ) {
-  const proseMessage = [...nextWorkspace.messages].reverse().find((message) => message.kind === 'prose')
+  const proseMessage = [...nextWorkspace.messages].reverse().find((message) => message.kind === 'prose' && message.status === 'ready')
   if (!proseMessage?.paragraphs?.length) return
   void analyzeProseStyle({ paragraphs: proseMessage.paragraphs }, textProvider, browserTransport)
     .then((issuesByParagraph) => saveModelProseAnalysis({
@@ -106,6 +106,11 @@ function scheduleModelProseAnalysis(
       // degrades to local rules only and users cannot tell why nothing shows up.
       console.warn('[prose-analysis] semantic analysis failed', cause)
       showToast('正文语义风检未完成，当前仅显示规则检测结果', 'error')
+      // The success path heals any missed paragraph-issue load via this same
+      // refresh (new message identities rerun every FeedbackProse effect); the
+      // failure path must keep that healing instead of leaving a chapter whose
+      // triggers never appear.
+      void refreshWorkspace(projectId).catch(() => undefined)
     })
 }
 

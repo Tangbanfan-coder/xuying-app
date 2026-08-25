@@ -24,12 +24,15 @@ const databaseMocks = vi.hoisted(() => ({
   recordProseEvaluationEvent: vi.fn(() => Promise.resolve()),
   recordProseEvaluationEvents: vi.fn(() => Promise.resolve()),
   saveModelProseAnalysis: vi.fn(() => Promise.resolve()),
+  saveMissedFlavorReport: vi.fn(() => Promise.resolve(true)),
   applyParagraphRewrite: vi.fn(),
   getActiveProjectId: vi.fn(),
   initializeStoryDatabase: vi.fn(),
   listChapterSummaryVersions: vi.fn(),
   listMessageFeedback: vi.fn(),
   listMessageParagraphsWithCurrentStyleIssues: vi.fn(),
+  listMissedFlavorReports: vi.fn(() => Promise.resolve([])),
+  deleteMissedFlavorReport: vi.fn(() => Promise.resolve()),
   listGeneratingImageAssets: vi.fn(),
   listProjects: vi.fn(),
   listReadyLocalIllustrations: vi.fn(),
@@ -198,14 +201,20 @@ vi.mock('./components/ConfirmDialog', () => ({
 vi.mock('./components/SettingsDrawer', () => ({
   default: ({
     open,
+    contextBudget,
+    onContextBudgetChange,
     onOpenContextUsage,
     onOpenSummaryHistory,
   }: {
     open: boolean
+    contextBudget: string
+    onContextBudgetChange: (budget: string) => Promise<void>
     onOpenContextUsage: () => void
     onOpenSummaryHistory: () => void
   }) => (
     open ? <>
+      <button type="button" onClick={() => void onContextBudgetChange('long').catch(() => undefined)}>切换到长上下文</button>
+      <span data-testid="settings-context-budget">{contextBudget}</span>
       <button type="button" onClick={onOpenContextUsage}>查看本轮上下文用量</button>
       <button type="button" onClick={onOpenSummaryHistory}>打开摘要版本历史</button>
     </> : null
@@ -567,6 +576,17 @@ describe('context usage and composer isolation', () => {
     await user.click(screen.getByRole('button', { name: '查看本轮上下文用量' }))
     expect(await screen.findByRole('dialog', { name: '上下文用量测试明细' })).toBeDefined()
   })
+
+  it('rolls back the context budget and reports an error when saving fails', async () => {
+    const user = userEvent.setup()
+    databaseMocks.updateContextBudget.mockRejectedValue(new Error('档位保存失败'))
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: '打开设置' }))
+    await user.click(screen.getByRole('button', { name: '切换到长上下文' }))
+    expect(await screen.findByText('档位保存失败')).toBeDefined()
+    await waitFor(() => expect(screen.getByTestId('settings-context-budget').textContent).toBe('standard'))
+  })
 })
 
 describe('quick reasoning effort control', () => {
@@ -678,6 +698,21 @@ describe('composer asset and illustration controls', () => {
     await user.click(screen.getByRole('button', { name: '配图模式：无图' }))
     await user.click(screen.getByRole('menuitemradio', { name: /按需/ }))
     expect(databaseMocks.updateIllustrationMode).toHaveBeenCalledWith(project.id, 'manual')
+  })
+
+  it('rolls back the illustration mode and reports an error when saving fails', async () => {
+    const user = userEvent.setup()
+    databaseMocks.loadProjectWorkspace.mockResolvedValue({
+      ...workspace,
+      project: { ...project, illustrationMode: 'auto' },
+    })
+    databaseMocks.updateIllustrationMode.mockRejectedValue(new Error('配图保存失败'))
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: '配图模式：自动' }))
+    await user.click(screen.getByRole('menuitemradio', { name: /无图/ }))
+    expect(await screen.findByText('配图保存失败')).toBeDefined()
+    await waitFor(() => expect(screen.getByRole('button', { name: '配图模式：自动' })).toBeDefined())
   })
 
   it.each([
